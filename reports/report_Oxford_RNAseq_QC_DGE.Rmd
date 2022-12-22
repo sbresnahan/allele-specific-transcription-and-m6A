@@ -426,21 +426,6 @@ number of genes detected (Figs. 1 and 3).  As compared to the analysis from
 February, about 500 more genes were detected per sample (Fig. 3 in this report
 vs. previous).
 
-One major difference after the Flair bug was fixed in June 2022 was that
-samples from cross A had far fewer reads mapping to the mitochondrial genome
-than samples from cross B did (Figs. 1 and 2).  I determined that one of the
-novel nuclear genes called by Flair, NC_037641.1:1186000, was was highly
-similar in sequence to a region of the mitochondrial genome spanning the
-l-rRNA and ND1 genes.  For the EHB parents, the sequence of this nuclear
-region was distinct from the mitochondrial region, and mitochondrial reads
-mapped correctly.  However, for AHB parents, SNP calls in the VCF were applied
-very similarly to both the nuclear and mitochondrial regions, causing mitochondrial
-reads to be mapped incorrectly to the nuclear region.  These were bottom strand
-transcripts, which helps explain why this issue was not seen in the previous
-analysis when bottom strand transcripts contained incorrect sequence. I do not
-anticipate that this mismapping will cause issues downstream, particularly after
-filtering mitochondrial reads (see below).
-
 ```{r fig01, fig.cap = "Fig. 1.  Library sizes expressed as number of aligned reads.", fig.width = 9, fig.height = 6}
 ggplot(targ_long, aes(x = Label, y = Reads, fill = Fate)) +
   geom_col() +
@@ -563,7 +548,7 @@ plotDensities( logCPM.filt, group = d$samples$Batch, col = 1:4, legend="topright
 
 ## Sample clustering
 
-Multidimensional scaling in the [limma](https://bioconductor.org/packages/release/bioc/html/limma.html)[^limma] package was used to assess the largest effects on gene composition among samples. The normalized logCPM values of the top most 5,000 variable genes between each pair of samples were chosen to construct the multidimensional scaling plot.  The first axis separated the two crosses, while the second axis separated sample T3-Ag1:A2C from the rest and to a lesser extent separated C and T samples (Fig. 11).  Interactive MDS plots are also available in the files "MDSclustering_preFiltering_2022-06-30.html" and "MDSclustering_postFiltering_2022-06-30.html" in the folder of Glimma plots.
+Multidimensional scaling in the [limma](https://bioconductor.org/packages/release/bioc/html/limma.html)[^limma] package was used to assess the largest effects on gene composition among samples. The normalized logCPM values of the top most 5,000 variable genes between each pair of samples were chosen to construct the multidimensional scaling plot.  The first axis separated the two crosses, while the second axis separated sample T3-Ag1:A2C from the rest and to a lesser extent separated C and T samples (Fig. 11).  
 
 ```{r fig11, fig.cap = "Fig. 11. Multidimensional scaling of samples after filtering, using the top 5000 variable genes between each pair of samples.", fig.width = 7, fig.height = 5}
 ggplot(mapping = aes(x = mymds.filt$x, y = mymds.filt$y,
@@ -607,11 +592,6 @@ kable(temp,
       caption = "Table 1. Number of gene significant for differential expression at FDR < 0.05.") %>%
   kable_styling() %>% row_spec(c(1,3), bold = TRUE)
 ```
-
-Results for all genes are listed in the file "differential_gene_expression_results_2022-06-30.xlsx".
-Files beginning with "glimma_MA" are interactive web applications for exploring
-the results.  Files are labelled "unadjusted" because no adjustment for tissue
-type was performed, unlike in an earlier report where there were two tissue types.
 
 ## Heatmaps for differential gene expression
 
