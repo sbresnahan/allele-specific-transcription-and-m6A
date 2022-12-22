@@ -14,10 +14,10 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 
 ## Methods
 
-### Call parent SNPs on the Amel_HAv3.1 reference genome
+### 1. Call parent SNPs on the Amel_HAv3.1 reference genome
 ##### > [call_parent_SNPs.md](src/call_parent_SNPs.md)
 
-### Create cross transcriptomes
+### 2. Create cross transcriptomes
 #### Base calling using Guppy
 ##### > [guppy_for_EpiNano_2022-05-17.sh](src/guppy_for_EpiNano_2022-05-17.sh)
 #### Prepare reference genome
@@ -29,7 +29,7 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 #### Combine parent transcriptomes to create cross transcriptomes
 ##### > [combine_transcriptomes.R](src/combine_transcriptomes.R)
 
-### Align to cross transcriptomes with EpiNano
+### 3. Align to cross transcriptomes with EpiNano
 #### Prepare cross transcriptomes
 ##### > [txptome_prep_2022-07-06.sh](src/txptome_prep_2022-07-06.sh)
 #### Align and predict m6A with EpiNano
@@ -37,24 +37,24 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 #### Combine EpiNano results into a single table of coverage and methylation probabilities
 ##### > [combine_results_2022-08-03.R](src/combine_results_2022-08-03.R)
 
-### Detection of lincRNAs
+### 4. Detection of lincRNAs
 ##### > [lincRNAs_2022-07-01.R](src/lincRNAs_2022-07-01.R)
 
-### Detection of isoform switching
+### 5. Detection of isoform switching
 ##### > [isoformSwitchAnalyzeR_2022-07-07.R](src/isoformSwitchAnalyzeR_2022-07-07.R)
 
-### Differential gene expression analysis
+### 6. Differential gene expression analysis
 ##### > [libyarlay_analysis_2022June_parenttxpt.R](src/libyarlay_analysis_2022June_parenttxpt.R)
 
-### Analysis of parent-of-origin allele-specific transcription and m6A, and their relationship to gene expression and isoform switching
+### 7. Analysis of parent-of-origin allele-specific transcription and m6A, and their relationship to gene expression and isoform switching
 ##### > Annotated markdown - [PSm6A.R](src/PSm6A.R)
 
 ## Results
 
-### [Identification and differential expression of lincRNAs](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_lincRNAs.html)
+### 1. [Identification and differential expression of lincRNAs](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_lincRNAs.html)
 
-### [Differential gene expression](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_Oxford_RNAseq_QC_DGE.html)
+### 2. [Differential gene expression](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_Oxford_RNAseq_QC_DGE.html)
 
-### [Isoform switching](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_isoform_switch.html)
+### 3. [Isoform switching](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_isoform_switch.html)
 
-### [Parent-of-origin allele-specific transcription and m6A](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_PSm6A.html)
+### 4. [Parent-of-origin allele-specific transcription and m6A](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/report_PSm6A.html)
