@@ -1,0 +1,560 @@
+---
+title: 'Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees: Analysis of isoform switching using Oxford Nanopore RNA data'
+author: 
+  - Lindsay Clark, HPCBio, Roy J. Carver Biotechnology Center, University of Illinois, Urbana-Champaign
+  - Modified for publication by Sean Bresnahan, Huck Institutes of the Life Sciences, Pennsylvania State University
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE)
+```
+
+```{r libs, warning=FALSE, message = FALSE}
+library(IsoformSwitchAnalyzeR)
+library(Biostrings)
+library(kableExtra)
+library(dplyr)
+```
+
+```{r analysis, eval = FALSE}
+# Import counts and transcript info
+mycounts <- read.table("../flair/2022-06-14/counts_matrix_AvsB_2022-07-06.tsv",
+                       sep = "\t", header = TRUE)
+
+# Regular expressions for splitting up transcript labels
+readidpat <- "^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}(-[[:digit:]])?"
+txptpat <- "^[NX][MR]_[[:digit:]]+\\.[[:digit:]]+(-[[:digit:]])?"
+pseudogene_pat <- "^gene[[:digit:]]+(-[[:digit:]])?"
+
+unknowngene_pat <- "N[CW]_[[:digit:]]+\\.[[:digit:]]+:[[:digit:]]+$"
+knowngene_pat <- "GeneID:[[:digit:]]+$"
+viralgene_pat <- "(DW|ABP|IAP|SB|CBP|VD)V(:[[:digit::]+)?$"
+rRNA_pat <- "l-rRNA$"
+
+# Function to make a data frame of information about each transcript
+# (modified from parental allele expression analysis)
+makeTxptInfo <- function(ids){
+  txptinfo <- data.frame(Label = ids,
+                         FlairLab = ids,
+                         Transcript = "",
+                         Gene = "",
+                         row.names = NULL)
+  
+  stopifnot(all(grepl(readidpat, txptinfo$FlairLab) |
+                  grepl(txptpat, txptinfo$FlairLab) |
+                  grepl(pseudogene_pat, txptinfo$FlairLab)))
+  stopifnot(all(grepl(unknowngene_pat, txptinfo$FlairLab) |
+                  grepl(knowngene_pat, txptinfo$FlairLab) |
+                  grepl(viralgene_pat, txptinfo$FlairLab) |
+                  grepl(rRNA_pat, txptinfo$FlairLab)))
+  
+  # Add transcript and gene ID to table
+  temp <- grep(paste0(readidpat, "_", unknowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", unknowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(readidpat, "_", knowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", knowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(txptpat, "_", knowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", knowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(txptpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(pseudogene_pat, "_", knowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", knowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(pseudogene_pat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(readidpat, "_", viralgene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", viralgene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(readidpat, "_", rRNA_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", rRNA_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  # Sanity check
+  stopifnot(!any(txptinfo$Gene == ""))
+  stopifnot(!any(txptinfo$Transcript == ""))
+  
+  return(txptinfo)
+}
+
+mytxpts <- makeTxptInfo(mycounts$ids)
+
+countsmat <- mycounts[,-1]
+colnames(countsmat) <- sub("_.*", "", colnames(countsmat))
+countsmat <- data.frame(isoform_id = mytxpts$Transcript,
+                        countsmat)
+
+# Import annotation ####
+# location of exons
+gtf <- rtracklayer::import("../flair/2022-06-14/All_samples_collapse.isoforms.gtf")
+gtf1 <- gtf[gtf$type == "exon"]
+
+# correct gene and txpt names
+ncrows <- which(endsWith(gtf1$transcript_id, "_NC")) # 12785 rows
+gtf1$gene_id[ncrows] <- paste0("NC_", gtf1$gene_id[ncrows])
+gtf1$transcript_id[ncrows] <- sub("_NC$", "", gtf1$transcript_id[ncrows])
+
+nwrows <- which(endsWith(gtf1$transcript_id, "_NW")) # 117 rows
+gtf1$gene_id[nwrows] <- paste0("NW_", gtf1$gene_id[nwrows])
+gtf1$transcript_id[nwrows] <- sub("_NW$", "", gtf1$transcript_id[nwrows])
+
+# Subset to what was counted
+gtf1 <- gtf1[gtf1$transcript_id %in% mytxpts$Transcript] # 137699 exons
+
+# Get the columns that IsoformSwitch wants
+mcols(gtf1) <- DataFrame(isoform_id = gtf1$transcript_id,
+                         gene_id = gtf1$gene_id)
+
+gene_info <- readRDS("results/final_report/annotations.rds") # NCBI GTF
+
+gtf1$gene_name <- gene_info$gene[match(gtf1$gene_id, gene_info$gene_id)]
+
+# Design matrices ####
+# Individual experimental groups
+design1 <- data.frame(sampleID = colnames(countsmat)[-1])
+design1$condition <-
+  paste0(substring(design1$sampleID, 8, 8),
+         substring(design1$sampleID, 10, 10))
+
+comparisons1 <- data.frame(condition_1 = c("AC", "AT", "BC", "AC"),
+                           condition_2 = c("BC", "BT", "BT", "AT"))
+
+# Cross B vs. Cross A
+design2 <- data.frame(sampleID = colnames(countsmat)[-1])
+design2$condition <- substring(design2$sampleID, 8, 8)
+design2$aggression <- substring(design2$sampleID, 10, 10)
+
+# C vs T
+design3 <- data.frame(sampleID = colnames(countsmat)[-1])
+design3$condition <- substring(design3$sampleID, 10, 10)
+design3$cross <- substring(design3$sampleID, 8, 8)
+
+# Interaction
+design4 <- data.frame(sampleID = design1$sampleID,
+                      condition = ifelse(design1$condition %in% c("AC", "BT"),
+                                         "ACBT", "ATBC"))
+# FASTA file with corrected names ####
+myfasta <- readDNAStringSet("../flair/2022-06-14/All_samples_collapse.isoforms.fa")
+all(mytxpts$FlairLab %in% names(myfasta)) # TRUE
+myfasta <- myfasta[mytxpts$FlairLab]
+names(myfasta) <- mytxpts$Transcript
+
+#writeXStringSet(myfasta, "../IsoformSwitchAnalyzeR/All_samples_collapse_relabeled_2022-07-07.isoforms.fa")
+
+# Create SwitchAnalyzeRlist ####
+
+sarlist1 <-
+  importRdata(isoformCountMatrix = countsmat,
+              designMatrix = design1,
+              isoformExonAnnoation = gtf1,
+              isoformNtFasta = "../IsoformSwitchAnalyzeR/All_samples_collapse_relabeled_2022-07-07.isoforms.fa",
+              comparisonsToMake = comparisons1,
+              fixStringTieAnnotationProblem = FALSE,
+              fixStringTieViaOverlapInMultiGenes = FALSE)
+
+sarlist2 <-
+  importRdata(isoformCountMatrix = countsmat,
+              designMatrix = design2,
+              isoformExonAnnoation = gtf1,
+              isoformNtFasta = "../IsoformSwitchAnalyzeR/All_samples_collapse_relabeled_2022-07-07.isoforms.fa",
+              fixStringTieAnnotationProblem = FALSE,
+              fixStringTieViaOverlapInMultiGenes = FALSE)
+
+sarlist3 <-
+  importRdata(isoformCountMatrix = countsmat,
+              designMatrix = design3,
+              isoformExonAnnoation = gtf1,
+              isoformNtFasta = "../IsoformSwitchAnalyzeR/All_samples_collapse_relabeled_2022-07-07.isoforms.fa",
+              fixStringTieAnnotationProblem = FALSE,
+              fixStringTieViaOverlapInMultiGenes = FALSE)
+
+sarlist4 <-
+  importRdata(isoformCountMatrix = countsmat,
+              designMatrix = design4,
+              isoformExonAnnoation = gtf1,
+              isoformNtFasta = "results/IsoformSwitchAnalyzeR/All_samples_collapse_relabeled_2022-07-07.isoforms.fa",
+              fixStringTieAnnotationProblem = FALSE,
+              fixStringTieViaOverlapInMultiGenes = FALSE)
+
+# Filtering ####
+sarlist1 <- preFilter(sarlist1)
+
+sarlist2 <- preFilter(sarlist2)
+
+sarlist3 <- preFilter(sarlist3)
+
+sarlist4 <- preFilter(sarlist4)
+
+# Test for differential isoform usage ####
+sarlist1_analyzed <- isoformSwitchTestDEXSeq(sarlist1,
+                                    reduceToSwitchingGenes = TRUE,
+                                    alpha = 0.1)
+
+sarlist2_analyzed <- isoformSwitchTestDEXSeq(sarlist2,
+                                             reduceToSwitchingGenes = TRUE,
+                                             alpha = 0.1)
+
+sarlist3_analyzed <- isoformSwitchTestDEXSeq(sarlist3,
+                                             reduceToSwitchingGenes = TRUE,
+                                             alpha = 0.1)
+
+# sarlist4_analyzed <- isoformSwitchTestDEXSeq(sarlist4,
+#                                              reduceToSwitchingGenes = TRUE,
+#                                              alpha = 0.1)
+
+# Add open reading frames ####
+sarlist1_analyzed <- analyzeORF(sarlist1_analyzed)
+
+sarlist2_analyzed <- analyzeORF(sarlist2_analyzed)
+
+# Write out sequences and import results from external tools ####
+sarlist1_analyzed <- extractSequence(sarlist1_analyzed, alpha = 0.1,
+                 pathToOutput = "../IsoformSwitchAnalyzeR/small_group_comparisons_2022-07-07",
+                 removeLongAAseq = TRUE,
+                 alsoSplitFastaFile = TRUE)
+# no sequences filtered for being too long
+
+sarlist2_analyzed <- extractSequence(sarlist2_analyzed, alpha = 0.1,
+                                     pathToOutput = "../IsoformSwitchAnalyzeR/A_vs_B_2022-07-07",
+                                     removeLongAAseq = TRUE,
+                                     alsoSplitFastaFile = TRUE)
+# no sequences filtered for being too long
+
+sarlist3_analyzed <- extractSequence(sarlist3_analyzed, alpha = 0.1,
+                                     pathToOutput = "../IsoformSwitchAnalyzeR/C_vs_T_2022-07-07",
+                                     removeLongAAseq = TRUE,
+                                     alsoSplitFastaFile = TRUE)
+# no sequences filtered for being too long
+
+sarlist1_analyzed <- analyzeCPC2(sarlist1_analyzed,
+                                 "results/IsoformSwitchAnalyzeR/small_group_comparisons_2022-07-07/result_cpc2.txt",
+                                 codingCutoff = 0.7, removeNoncodinORFs = TRUE)
+# Added coding potential to 82 (100%) transcripts
+
+sarlist1_analyzed <- analyzePFAM(sarlist1_analyzed,
+                                 "results/IsoformSwitchAnalyzeR/small_group_comparisons_2022-07-07/hmmscan_pfam.txt")
+# Added domain information to 33 (40.24%) transcripts
+
+sarlist1_analyzed <- analyzeSignalP(sarlist1_analyzed,
+                                    "results/IsoformSwitchAnalyzeR/small_group_comparisons_2022-07-07/SignalP5_output_protein_type.txt")
+#  Added signal peptide information to 15 (18.29%) transcripts
+
+sarlist1_analyzed <- analyzeNetSurfP2(sarlist1_analyzed,
+                                      "results/IsoformSwitchAnalyzeR/small_group_comparisons_2022-07-07/NetSurfP2_62C734E30000796FC67C4B82.csv")
+# Added IDR information to 17 (20.73%) transcripts
+
+
+sarlist2_analyzed <- analyzeCPC2(sarlist2_analyzed,
+                                 "results/IsoformSwitchAnalyzeR/A_vs_B_2022-07-07/result_cpc2.txt",
+                                 codingCutoff = 0.7, removeNoncodinORFs = TRUE)
+# Added coding potential to 71 (100%) transcripts
+
+sarlist2_analyzed <- analyzePFAM(sarlist2_analyzed,
+                                 "results/IsoformSwitchAnalyzeR/A_vs_B_2022-07-07/hmmer_pfam.txt")
+# Added domain information to 17 (23.94%) transcripts
+
+sarlist2_analyzed <- analyzeSignalP(sarlist2_analyzed,
+                                    "results/IsoformSwitchAnalyzeR/A_vs_B_2022-07-07/SignalP5_output_protein_type.txt")
+#  Added signal peptide information to 15 (21.13%) transcripts
+
+sarlist2_analyzed <- analyzeNetSurfP2(sarlist2_analyzed,
+                                      "results/IsoformSwitchAnalyzeR/A_vs_B_2022-07-07/NetSurfP2_62CB260C000012B09ECDA369.csv")
+
+# Added IDR information to 13 (18.31%) transcripts
+
+
+sarlist3_analyzed <- analyzeCPC2(sarlist3_analyzed,
+                                 "results/IsoformSwitchAnalyzeR/C_vs_T_2022-07-07/result_cpc2.txt",
+                                 codingCutoff = 0.7, removeNoncodinORFs = TRUE)
+# Added coding potential to 35 (100%) transcripts
+
+sarlist3_analyzed <- analyzePFAM(sarlist3_analyzed,
+                                 "results/IsoformSwitchAnalyzeR/C_vs_T_2022-07-07/hmmscan_pfam.txt")
+# Added domain information to 32 (91.43%) transcripts
+
+sarlist3_analyzed <- analyzeSignalP(sarlist3_analyzed,
+                                    "results/IsoformSwitchAnalyzeR/C_vs_T_2022-07-07/SignalP5_output_protein_type.txt")
+#  Added signal peptide information to 3 (8.57%) transcripts 
+
+sarlist3_analyzed <- analyzeNetSurfP2(sarlist3_analyzed,
+                                      "results/IsoformSwitchAnalyzeR/C_vs_T_2022-07-07/NetSurfP2_62CB440B000050B79235E116.csv")
+# Added IDR information to 7 (20%) transcripts
+
+# Analyze alternative splicing ####
+sarlist1_analyzed <- analyzeAlternativeSplicing(sarlist1_analyzed,
+                                                alpha = 0.1)
+# warning about transcripts not from same strand
+
+sarlist1_analyzed <- analyzeSwitchConsequences(sarlist1_analyzed,
+                                               alpha = 0.1,
+                                               removeNonConseqSwitches = FALSE)
+
+# A vs B
+sarlist2_analyzed <- analyzeAlternativeSplicing(sarlist2_analyzed,
+                                                alpha = 0.1)
+
+sarlist2_analyzed <- analyzeSwitchConsequences(sarlist2_analyzed,
+                                               alpha = 0.1,
+                                               removeNonConseqSwitches = FALSE)
+
+# C vs T
+sarlist3_analyzed <- analyzeAlternativeSplicing(sarlist3_analyzed,
+                                                alpha = 0.1)
+
+sarlist3_analyzed <- analyzeSwitchConsequences(sarlist3_analyzed,
+                                               alpha = 0.1,
+                                               removeNonConseqSwitches = FALSE)
+
+#saveRDS(sarlist1_analyzed, file = "sarlist1_analyzed_2022-07-15.rds")
+#saveRDS(sarlist2_analyzed, file = "sarlist2_analyzed_2022-07-15.rds")
+#saveRDS(sarlist3_analyzed, file = "sarlist3_analyzed_2022-07-15.rds")
+```
+
+```{r loadresults, eval = TRUE, message = FALSE, warning = FALSE}
+sarlist1_analyzed <- readRDS("sarlist1_analyzed_2022-07-15.rds")
+sarlist2_analyzed <- readRDS("sarlist2_analyzed_2022-07-15.rds")
+sarlist3_analyzed <- readRDS("sarlist3_analyzed_2022-07-15.rds")
+
+topswitches1 <- extractTopSwitches(sarlist1_analyzed, filterForConsequences = TRUE, alpha = 0.1, n = Inf)
+topswitches2 <- extractTopSwitches(sarlist2_analyzed, filterForConsequences = TRUE, alpha = 0.1, n = Inf)
+topswitches3 <- extractTopSwitches(sarlist3_analyzed, filterForConsequences = TRUE, alpha = 0.1, n = Inf)
+```
+
+```{r export, eval = FALSE}
+# cairo_pdf("../IsoformSwitchAnalyzeR/Significant_switches_small_group_comparisons_2022-07-15.pdf",
+#           width = 9, height = 7, onefile = TRUE)
+for(i in seq_len(nrow(topswitches1))){
+  switchPlot(sarlist1_analyzed, gene = topswitches1$gene_id[i],
+             condition1 = topswitches1$condition_1[i],
+             condition2 = topswitches1$condition_2[i],
+             alphas = c(0.1, 0.001))
+}
+# dev.off()
+
+# write.table(sarlist1_analyzed$isoformFeatures[,-(1:2)], sep = "\t", row.names = FALSE,
+#             file = "../IsoformSwitchAnalyzeR/Isoform_results_small_group_comparisons_2022-07-15.txt")
+
+# A vs B
+# cairo_pdf("../IsoformSwitchAnalyzeR/Significant_switches_A_vs_B_2022-07-15.pdf",
+#           width = 9, height = 7, onefile = TRUE)
+for(i in seq_len(nrow(topswitches2))){
+  switchPlot(sarlist2_analyzed, gene = topswitches2$gene_id[i],
+             condition1 = topswitches2$condition_1[i],
+             condition2 = topswitches2$condition_2[i],
+             alphas = c(0.1, 0.001))
+}
+# dev.off()
+
+# write.table(sarlist2_analyzed$isoformFeatures[,-(1:2)], sep = "\t", row.names = FALSE,
+#             file = "../IsoformSwitchAnalyzeR/Isoform_results_A_vs_B_2022-07-15.txt")
+
+# cairo_pdf("../IsoformSwitchAnalyzeR/Significant_switches_C_vs_T_2022-07-15.pdf",
+#           width = 9, height = 7, onefile = TRUE)
+for(i in seq_len(nrow(topswitches3))){
+  switchPlot(sarlist3_analyzed, gene = topswitches3$gene_id[i],
+             condition1 = topswitches3$condition_1[i],
+             condition2 = topswitches3$condition_2[i],
+             alphas = c(0.1, 0.001))
+}
+# dev.off()
+
+# write.table(sarlist3_analyzed$isoformFeatures[,-(1:2)], sep = "\t", row.names = FALSE,
+#             file = "../IsoformSwitchAnalyzeR/Isoform_results_C_vs_T_2022-07-15.txt")
+```
+
+## Results files
+
+* "results/IsoformSwitchAnalyzeR": Contains results and some intermediate files for IsoformSwitchAnalyzeR.
+  - "small_group_comparisons_2022-07-07" refers to AC vs BC, AT vs BT, AC vs AT, and BC vs BT.
+  - "A_vs_B_2022-07-07" refers to the comparison of crosses A and B, using C/T as a batch effect.
+  - "C_vs_T_2022-07-07" refers to the comparison of groups C and T, using cross as a batch effect.
+  - Three Excel sheets ending in "2022-07-15" list differential expression results at the isoform and gene level for all genes with
+    significant isoform switching at FDR < 0.1.  See "Excel sheet columns" below.
+  - Three PDFs ending in "2022-07-15" contain plots showing consequences of isoform switching for genes significant at FDR < 0.1.
+  The first page of these is blank and can be ignored.
+  - `All_samples_collapse_relabeled_2022-07-07.isoforms.fa` contains sequences of isoforms quantified by
+  Flair, with sequence names trimmed to just refer to the transcript identifier.  This file was used
+  for analysis in IsoformSwitchAnalyzeR.
+  - Three folders ending in "2022-07-07" contain intermediate files from using external tools to assess consequences of changes
+  in protein and transcript sequence.
+* flair/2022-06-14: Contains flair output files that were used as input to
+IsoformSwitchAnalyzeR
+
+Additionally, all scripts and code for the full analysis are available at
+https://github.com/sbresnahan/allele-specific-transcription-and-m6A.  
+
+**Excel sheet columns**
+
+This information is copied from the
+[IsoformSwitchAnalyzeR reference manual](https://bioconductor.org/packages/release/bioc/manuals/IsoformSwitchAnalyzeR/man/IsoformSwitchAnalyzeR.pdf).
+
+* isoform_id : A unique isoform id
+* gene_id : A unique gene id referring to a gene at a specific genomic loci (not the same as
+gene_name since gene_names can refer to multiple genomic loci)
+* condition_1 : Name of the first condition in the comparison
+* condition_2 : Name of the second condition in the comparison
+* gene_name : The gene name associated with the gene_id, typically a more readable one
+(for example p53 or BRCA1)
+* gene_overall_mean : Mean expression of gene_id across all samples
+* gene_value_1 : Expression of gene_id in condition_1
+* gene_value_2 : Expression of gene_id in condition_2
+* gene_stderr_1 : Standard error (of mean) of gene_id expression in condition_1
+* gene_stderr_2 : Standard error (of mean) of gene_id expression in condition_2
+* gene_log2_fold_change : log2 fold change of gene_id expression between condition_1
+and condition_2
+* gene_q_value : The FDR corrected (for multiple testing) p-value of the differential expres-
+sion test of gene_id
+* iso_overall_mean : Mean expression of isoform_id across all samples
+* iso_value_1 : Expression of isoform_id in condition_1
+* iso_value_2 : Expression of isoform_id in condition_2
+so_stderr_1 : Standard error (of mean) of isoform_id expression in condition_1
+* iso_stderr_2 : Standard error (of mean) of isoform_id expression in condition_2
+* iso_log2_fold_change : log2 fold change of isoform_id expression between condition_1
+and condition_2
+* iso_q_value : The FDR corrected (for multiple testing) p-value of the differential expression
+test of isoform_id
+* IF_overall : The average isoform_id usage across all samples (given as Isoform Fraction
+(IF) value)
+* IF1 : The isoform_id usage in condition 1 (given as Isoform Fraction (IF) value)
+* IF2 : The isoform_id usage in condition 2 (given as Isoform Fraction (IF) value)
+* dIF : The change in isoform usage from condition_1 to condition_2 (difference in IF values
+(dIF))
+* isoform_switch_q_value : The q-value of the test of differential isoform usage in iso-
+form_id between condition 1 and condition 2. Use NA if not performed. Will be overwritten
+by the result of testIsoformSwitches. If only performed at gene level use same values on
+isoform level.
+* gene_switch_q_value : The q-value of the test of differential isoform usage in gene_id
+between condition 1 and condition 2. Use NA if not performed. Will be overwritten by the
+result of testIsoformSwitches.
+* PTC: Indicates sensitivity to nonsense-mediated decay in coding transcripts.
+* codingPotentialValue: Coding potential for the isoform, estimated by CPAT.
+* codingPotential: Indicates whether codingPotentialValue is above 0.7.
+* domainIdentified: Indicates whether PFAM found known domains in the predicted ORF.
+* signal_peptide_identified: Indicates whether SignalP identified a signal peptide within
+the predicted ORF.
+* idr_identified: Indicates whether NetSurfP2 identified an intrinsically disordered region
+in the predicted ORF.
+* IR: Number of intron retentions predicted in the transcript.
+* switchConsequencesGene: Indicates whether different isoforms for the gene are different
+in terms of coding potential, domains, signal peptides, or intrinsically disordered regions.
+
+## Study design
+
+This study seeks to use transcriptome data to understand behavioral differences
+between non-aggressive and aggressive honey bees.  Two crosses were made.
+Cross A had AHB as the female parent (SRR14654188) and EHB as the male parent
+(SRR14654189).  Cross B had EHB as the female parent (SRR14654186) and AHB as
+the male parent (SRR14654187).  Three or more aggressive bees and three or more
+non-aggressive bees (labeled C and T) were collected from each cross. Twelve
+head and abdomen samples, spanning multiple batches over the course of a year,
+were ultimately analyzed, with three samples per experimental group.
+RNA samples were sequenced with Oxford Nanopore Technology direct RNA sequencing on a FLO-MIN106 flowcell.
+
+In this report, I analyze differential isoform usage among treatment groups.
+
+## Sample processing
+
+FAST5 files from all samples were processed with Guppy 5.0.16 using the
+`rna_r9.4.1_70bps_hac.cfg` configuration (Oxford Nanopore Technologies)
+for base calling on a GPU.  FASTQ files labeled "pass" were concatenated
+together to generate one FASTQ per sample.
+[Minimap 2.21](https://github.com/lh3/minimap2)[^minimap2] was used for
+alignment to the
+[_Apis mellifera_ HAv3.1 reference genome](https://www.ncbi.nlm.nih.gov/genome/48?genome_assembly_id=403979)
+(plus common viral genomes) in splice-aware mode with a kmer length of 14,
+using the published gene annotation to guide alignment.
+[SAMtools 1.12](https://github.com/samtools/samtools)[^samtools] was used to
+sort and index the resulting BAM files.
+[Flair 1.5](https://github.com/BrooksLabUCSC/flair)[^flair] was then used to
+convert BAM files to BED format and correct intron-exon junctions based on
+the published annotation, then call isoforms across all samples.  These
+isoforms included published transcripts and genes as well as novel transcripts
+and genes.  
+
+The `flair quantify` command was then used to quantify abundance of each
+transcript in each sample.  Counts were then imported into IsoformSwitchAnalyzeR
+v. 1.18.0[^isoform][^isoform1] in R.  Four study designs were used:
+
+* Samples being assigned to one of four groups AC, AT, BC, or BT, with the contrasts
+AT - AC, BT - BC, BC - AC, and BT - AT being evaluated.
+* Samples were assigned to cross A or B, with C/T as a covariate, with the contrast
+B - A being evaluated.
+* Samples were assigned to experimental group C or T, with cross A/B as a covariate,
+with the contrast T - C being evaluated.
+* For the interaction effect, BC and AT samples together were compared to BT and AC
+samples together.
+
+Within IsoformSwitchAnalyzeR, DEXseq[^dexseq] was used to test for differential
+isoform expression, with genes being retained for further analysis at FDR < 0.1.
+At this stage, there were no significant hits for the interaction
+effect, so that designs was not analyzed further. This is an improvement upon the
+previous version of the analysis before the bug with Flair was fixed, in which there
+were no significant hits for T - C.
+
+Open reading frames were
+then predicted de-novo from the transcript sequences.  Transcript sequences were
+analyzed by [CPC2](http://cpc2.gao-lab.org/batch.php)[^cpc2] to predict coding
+potential, overriding ORFs called by IsoformSwitchAnalyzeR if the transcript
+was determined to be non-coding at a cutoff of 0.7.
+[hmmscan](https://www.ebi.ac.uk/Tools/hmmer/search/hmmscan)[^hmmer] was then
+used to compare predicted ORFs to the Pfam database[^pfam] to predict protein
+domains.
+[SignalP 5.0](https://services.healthtech.dtu.dk/service.php?SignalP-5.0)[^signalp]
+was used to predict signal peptides within predicted ORFs.
+[NetSurfP2](https://services.healthtech.dtu.dk/service.php?NetSurfP-2.0)[^netsurfp2]
+was used to predict intrinsically disordered regions within predicted ORFs.
+Alternative splicing was then analyzed within IsoformSwitchAnalyzeR.  Isoform switches
+were determined to have "consequences" if coding potential, domains, signal peptides,
+intrinsically disordered regions, or intron retention changed.
+
+## Results
+
+Few genes were significant for isoform switching, and those that were tended to
+be highly expressed, suggesting that more significant switches could have been
+detected with higher sequence read depth.  However, the switches that were
+detected are potentially interesting, for example the switch from a coding
+transcript to a non-coding transcript for _Apid1_ in cross B as compared to
+cross A, as well as group BC as compared to BT (see PDFs of switch consequences).
+Genes with significant switches with putative functional consequences are listed
+in Table 1. With respect to the analysis before fixing the flair bug, more
+significant switches with functional consequences were found for most contrasts.
+
+```{r table01, warning = FALSE}
+rbind(topswitches1[,2:6], topswitches2[,2:6], topswitches3[,2:6]) %>%
+  arrange(gene_switch_q_value) %>%
+  kable(caption = "Table 1. Genes with significant (FDR < 0.1) isoform switches with putative functional consequences.") %>%
+  kable_styling()
+```
+
+## References
+
+[^flair]: Tang, A.D., Soulette, C.M., van Baren, M.J. et al. Full-length transcript characterization of SF3B1 mutation in chronic lymphocytic leukemia reveals downregulation of retained introns. Nat Commun 11, 1438 (2020). https://doi.org/10.1038/s41467-020-15171-6
+
+[^dexseq]: Anders, S., Reyes, A., and Huber, W. (2012) Detecting differential usage of exons from RNA-seq data.  Genome Research 22(10), 2008-2017, doi:10.1101/gr.133744.111.
+
+[^cpat]: Wang, L., Park, H.J., Dasari, S., Wang, S., Jean Kocher, J., and Li, W. (2013) CPAT: Coding-Potential Assessment Tool using an alignment-free logistic regression model. Nucleic Acids Research, 41(6), e74, https://doi.org/10.1093/nar/gkt006
+
+[^pfam]: Punta, M., Coggill, P.C., Eberhardt, R.Y., Mistry, J., Tate, J. Boursnell, C., Pang, N., Forslund, K., Ceric, G., Clements, J., Heger, A., Holm, L., Sonnhammer, E.L.L., Eddy, S.R., Bateman, A., and Finn, R.D. (2012) The Pfam protein families database. Nucleic Acids Research, 40(D1), D290–D301, https://doi.org/10.1093/nar/gkr1065
+
+[^signalp]: José Juan Almagro Armenteros, Konstantinos D. Tsirigos, Casper Kaae Sønderby, Thomas Nordahl Petersen, Ole Winther, Søren Brunak, Gunnar von Heijne and Henrik Nielsen. (2019) SignalP 5.0 improves signal peptide predictions using deep neural networks. Nature Biotechnology, 37, 420-423, doi:10.1038/s41587-019-0036-z
+
+[^netsurfp2]: Michael Schantz Klausen, Martin Closter Jespersen, Henrik Nielsen, Kamilla Kjærgaard Jensen, Vanessa Isabell Jurtz, Casper Kaae Sønderby, Morten Otto Alexander Sommer, Ole Winther, Morten Nielsen, Bent Petersen, and Paolo Marcatili. NetSurfP-2.0: Improved prediction of protein structural features by integrated deep learning . Proteins: Structure, Function, and Bioinformatics (Feb. 2019). doi: 10.1002/prot.25674
+
+[^isoform]: Vitting-Seerup, K. & Sandelin, A. (2017) The Landscape of Isoform Switches in Human Cancers. Molecular Cancer Research, 15(9), 1206-1220, doi:10.1158/1541-7786.MCR-16-0459.
+
+[^isoform1]: Vitting-Seerup, K. & Sandelin, A. (2019) IsoformSwitchAnalyzeR: analysis of changes in genome-wide patterns of alternative splicing and its functional consequences. Bioinformatics, 35(21), 4469–4471, https://doi.org/10.1093/bioinformatics/btz247
+
+[^minimap2]: Li, H. (2018). Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics, 34:3094-3100. doi:10.1093/bioinformatics/bty191
+
+[^samtools]: Petr Danecek, James K Bonfield, Jennifer Liddle, John Marshall, Valeriu Ohan, Martin O Pollard, Andrew Whitwham, Thomas Keane, Shane A McCarthy, Robert M Davies, Heng Li (2021). Twelve years of SAMtools and BCFtools. GigaScience, Volume 10, Issue 2, giab008, https://doi.org/10.1093/gigascience/giab008
+
+[^hmmer]: S.C. Potter, A. Luciani, S.R. Eddy Y. Park, R. Lopez and R.D. Finn (2018). HMMER web server: 2018 update. Nucleic Acids Research Web Server Issue 46:W200-W204.
+
+[^cpc2]: Kang Y. J., Yang D. C., Kong L., Hou M., Meng Y. Q., Wei L., Gao G. 2017. CPC2: a fast and accurate coding potential calculator based on sequence intrinsic features. Nucleic Acids Research 45(Web Server issue): W12–W16.

@@ -1,0 +1,699 @@
+---
+title: 'Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees: QC and differential gene expression'
+author: 
+  - Lindsay Clark, HPCBio, Roy J. Carver Biotechnology Center, University of Illinois, Urbana-Champaign
+  - Modified for publication by Sean Bresnahan, Huck Institutes of the Life Sciences, Pennsylvania State University
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+```
+
+```{r libs, message = FALSE, warning = FALSE}
+library(limma)
+library(edgeR)
+library(GenomicRanges)
+library(ggplot2)
+library(dplyr)
+library(tidyr)
+library(Glimma)
+library(RColorBrewer)
+library(ggrepel)
+library(seriation)
+library(viridis)
+library(heatmaply)
+library(kableExtra)
+```
+
+```{r analysis}
+# Import and initial QC ####
+
+# Sample info
+targets <- read.delim("targets_Dec2021.txt")
+targets <- targets[targets$Use,]
+targets <- targets[order(targets$Cross, targets$Aggression),]
+targets$Name[c(1:3, 6)] <- c("T3-Ag1:A2C", "T3-Ag1:A7C", "T3-Ag1:A9C", "T3-Ag2:A1T")
+targets$Label <- targets$Name
+targets$Label <- factor(targets$Label, levels = targets$Label)
+targets$Group <- paste0(targets$Cross, targets$Aggression)
+targets$FlairName <- paste(targets$Name, targets$Aggression,
+                           sub("^[[:digit:]]{1,2}-", "", sub("-[[:digit:]]{2}$", "", targets$Batch)),
+                           sep = "_")
+
+colorkey <- brewer.pal(4, "Paired")
+names(colorkey) <- unique(targets$Group)
+
+# Import GTF
+gtf0 <- readRDS("annotations.rds")
+gtf1 <- gtf0[gtf0$type == "gene"]
+
+# Genomic coordinates of isoforms
+isoform_anno <- read.table("All_samples_collapse.isoforms_2022-06-14.bed",
+                           sep = "\t", header = FALSE)
+
+# Import results from flair
+countsmatA <- as.matrix(read.table("counts_matrix_parenttxpt_A_2022-06-14.tsv",
+                                  row.names = 1, header = TRUE, check.names = FALSE))
+
+countsmatB <- as.matrix(read.table("counts_matrix_parenttxpt_B_2022-06-14.tsv",
+                                   row.names = 1, header = TRUE, check.names = FALSE))
+
+mode(countsmatA) <- "integer"
+mode(countsmatB) <- "integer"
+
+# Regular expressions for splitting up transcript labels
+readidpat <- "^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}(-[[:digit:]])?"
+txptpat <- "^[NX][MR]_[[:digit:]]+\\.[[:digit:]]+(-[[:digit:]])?"
+pseudogene_pat <- "^gene[[:digit:]]+(-[[:digit:]])?"
+
+unknowngene_pat <- "N[CW]_[[:digit:]]+\\.[[:digit:]]+:[[:digit:]]+$"
+knowngene_pat <- "GeneID:[[:digit:]]+$"
+viralgene_pat <- "(DW|ABP|IAP|SB|CBP|VD)V(:[[:digit::]+)?$"
+rRNA_pat <- "l-rRNA$"
+
+# Function to make a data frame of information about each transcript
+makeTxptInfo <- function(countsmat){
+  txptinfo <- data.frame(Label = rownames(countsmat),
+                         FlairLab = sub("(Both|SRR1465418[6-9])-", "", rownames(countsmat)),
+                         Parent = sub("-.*$", "", rownames(countsmat)),
+                         Transcript = "",
+                         Gene = "",
+                         TotDepth = rowSums(countsmat),
+                         row.names = NULL)
+  
+  stopifnot(all(grepl(readidpat, txptinfo$FlairLab) |
+                  grepl(txptpat, txptinfo$FlairLab) |
+                  grepl(pseudogene_pat, txptinfo$FlairLab)))
+  stopifnot(all(grepl(unknowngene_pat, txptinfo$FlairLab) |
+                  grepl(knowngene_pat, txptinfo$FlairLab) |
+                  grepl(viralgene_pat, txptinfo$FlairLab) |
+                  grepl(rRNA_pat, txptinfo$FlairLab)))
+  
+  # Add transcript and gene ID to table
+  temp <- grep(paste0(readidpat, "_", unknowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", unknowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(readidpat, "_", knowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", knowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(txptpat, "_", knowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", knowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(txptpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(pseudogene_pat, "_", knowngene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", knowngene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(pseudogene_pat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(readidpat, "_", viralgene_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", viralgene_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  temp <- grep(paste0(readidpat, "_", rRNA_pat), txptinfo$FlairLab)
+  txptinfo$Transcript[temp] <- sub(paste0("_", rRNA_pat), "", txptinfo$FlairLab[temp])
+  txptinfo$Gene[temp] <- sub(paste0(readidpat, "_"), "", txptinfo$FlairLab[temp])
+  
+  # Sanity check
+  stopifnot(!any(txptinfo$Gene == ""))
+  stopifnot(!any(txptinfo$Transcript == ""))
+  
+  # Add gene symbol
+  txptinfo$Symbol <- gtf1$gene[match(txptinfo$Gene, gtf1$gene_id)]
+  
+  temp <- match(txptinfo$FlairLab, isoform_anno$V4)
+  stopifnot(!any(is.na(temp)))
+  txptinfo$Chromosome <- isoform_anno$V1[temp]
+  txptinfo$Start <- isoform_anno$V2[temp]
+  txptinfo$End <- isoform_anno$V3[temp]
+  
+  return(txptinfo)
+}
+
+txptinfoA <- makeTxptInfo(countsmatA)
+txptinfoB <- makeTxptInfo(countsmatB)
+
+# QC stats for samples ###
+
+rowsA <- match(colnames(countsmatA), targets$FlairName)
+rowsB <- match(colnames(countsmatB), targets$FlairName)
+
+targets$Reads_aligned <- 0L
+targets$Reads_aligned[rowsA] <- colSums(countsmatA)
+targets$Reads_aligned[rowsB] <- colSums(countsmatB)
+
+targets$Reads_known_txpt_nuclear <- 0L
+targets$Reads_known_txpt_nuclear[rowsA] <- colSums(countsmatA[grepl(txptpat, txptinfoA$Transcript) &
+                                                        txptinfoA$Chromosome != "NC_001566.1",])
+targets$Reads_known_txpt_nuclear[rowsB] <- colSums(countsmatB[grepl(txptpat, txptinfoB$Transcript) &
+                                                        txptinfoB$Chromosome != "NC_001566.1",])
+
+targets$Reads_viral <- 0L
+targets$Reads_viral[rowsA] <- colSums(countsmatA[grep(viralgene_pat, txptinfoA$Gene),])
+targets$Reads_viral[rowsB] <- colSums(countsmatB[grep(viralgene_pat, txptinfoB$Gene),])
+
+targets$Reads_known_gene_novel_isoform_nuclear <- 0L
+targets$Reads_known_gene_novel_isoform_nuclear[rowsA] <-
+  colSums(countsmatA[grepl(knowngene_pat, txptinfoA$Gene) & grepl(readidpat, txptinfoA$Transcript) &
+                       txptinfoA$Chromosome != "NC_001566.1",])
+targets$Reads_known_gene_novel_isoform_nuclear[rowsB] <-
+  colSums(countsmatB[grepl(knowngene_pat, txptinfoB$Gene) & grepl(readidpat, txptinfoB$Transcript) &
+                       txptinfoB$Chromosome != "NC_001566.1",])
+
+targets$Reads_pseudogene <- 0L
+targets$Reads_pseudogene[rowsA] <- colSums(countsmatA[grep(pseudogene_pat, txptinfoA$Transcript),])
+targets$Reads_pseudogene[rowsB] <- colSums(countsmatB[grep(pseudogene_pat, txptinfoB$Transcript),])
+
+targets$Reads_unknown_gene_nuclear <- 0L
+targets$Reads_unknown_gene_nuclear[rowsA] <-
+  colSums(countsmatA[grepl(unknowngene_pat, txptinfoA$Gene) &
+                       txptinfoA$Chromosome != "NC_001566.1",])
+targets$Reads_unknown_gene_nuclear[rowsB] <-
+  colSums(countsmatB[grepl(unknowngene_pat, txptinfoB$Gene) &
+                       txptinfoB$Chromosome != "NC_001566.1",])
+
+targets$Reads_mitochondrial <- 0L
+targets$Reads_mitochondrial[rowsA] <- colSums(countsmatA[txptinfoA$Chromosome == "NC_001566.1",])
+targets$Reads_mitochondrial[rowsB] <- colSums(countsmatB[txptinfoB$Chromosome == "NC_001566.1",])
+
+targets$Reads_NC_037641.1_1186000 <- 0L
+targets$Reads_NC_037641.1_1186000[rowsA] <- colSums(countsmatA[txptinfoA$Gene == "NC_037641.1:1186000",])
+targets$Reads_NC_037641.1_1186000[rowsB] <- colSums(countsmatB[txptinfoB$Gene == "NC_037641.1:1186000",])
+
+targets$Reads_unknown_gene_nuclear <-
+  targets$Reads_unknown_gene_nuclear - targets$Reads_NC_037641.1_1186000
+
+# Build longer table for plots
+targ_long <- targets %>% select(Label, Group, Batch, starts_with("Reads")) %>%
+  pivot_longer(cols = all_of(c("Reads_known_txpt_nuclear", "Reads_viral", "Reads_known_gene_novel_isoform_nuclear",
+                               "Reads_unknown_gene_nuclear", "Reads_mitochondrial", "Reads_NC_037641.1_1186000")),
+               names_to = "Fate", values_to = "Reads") %>%
+  mutate(Fate = factor(sub("txpt", "transcript", sub("Reads_", "", Fate)),
+                       levels = c("mitochondrial", "viral", "NC_037641.1_1186000", "unknown_gene_nuclear",
+                                  "known_gene_novel_isoform_nuclear", "known_transcript_nuclear")))
+
+# Confirm mitochondrial reads assigned to mother ####
+txptinfoA$Mito <- txptinfoA$Chromosome == "NC_001566.1" | txptinfoA$Gene == "NC_037641.1:1186000"
+prop_mito_A <- apply(countsmatA, 2,
+                     function(x){
+                       tot <- sum(x)
+                       sapply(unique(txptinfoA$Parent),
+                              function(y) sum(x[txptinfoA$Mito & txptinfoA$Parent == y]) / tot )
+                     })
+
+txptinfoB$Mito <- txptinfoB$Chromosome == "NC_001566.1" | txptinfoB$Gene == "NC_037641.1:1186000"
+prop_mito_B <- apply(countsmatB, 2,
+                     function(x){
+                       tot <- sum(x)
+                       sapply(unique(txptinfoB$Parent),
+                              function(y) sum(x[txptinfoB$Mito & txptinfoB$Parent == y]) / tot )
+                     })
+
+# Summarize to gene ####
+allgenes <- sort(unique(c(txptinfoA$Gene, txptinfoB$Gene))) # 19920 genes
+
+countsmat_gene <- matrix(0L, nrow = length(allgenes), ncol = ncol(countsmatA) + ncol(countsmatB),
+                         dimnames = list(allgenes, c(colnames(countsmatA), colnames(countsmatB))))
+for(g in allgenes){
+  theserows <- which(txptinfoA$Gene == g)
+  countsmat_gene[g,colnames(countsmatA)] <- colSums(countsmatA[theserows,,drop = FALSE])
+  theserows <- which(txptinfoB$Gene == g)
+  countsmat_gene[g,colnames(countsmatB)] <- colSums(countsmatB[theserows,,drop = FALSE])
+}
+
+# Beebase IDs; vector follows gtf1
+hasbb <- grepl("BEEBASE:", gtf1$Dbxref)
+beebaseID <- rep(NA_character_, length(gtf1))
+beebaseID[hasbb] <- sub("^.*BEEBASE:", "", sub(",.*$", "", gtf1$Dbxref[hasbb]))
+
+# QC on gene counts
+targets$Genes_detected <- colSums(countsmat_gene > 0)[targets$FlairName]
+targets$Known_genes_detected <-
+  colSums(countsmat_gene[grep(knowngene_pat, rownames(countsmat_gene)),] > 0)[targets$FlairName]
+
+# DGEList ####
+
+d <- DGEList(countsmat_gene[,targets$FlairName], samples = targets)
+
+d$genes <- data.frame(row.names = rownames(countsmat_gene),
+                      Symbol = gtf1$gene[match(rownames(countsmat_gene), gtf1$gene_id)],
+                      Beebase = beebaseID[match(rownames(countsmat_gene), gtf1$gene_id)])
+
+# Remove mitochondrial genes, since these are impacting TMM factors ####
+mt.filt <- txptinfoA$Mito[match(rownames(d), txptinfoA$Gene)] |
+  txptinfoB$Mito[match(rownames(d), txptinfoB$Gene)]
+mt.filt[is.na(mt.filt)] <- FALSE
+
+d <- d[!mt.filt,, keep.lib.sizes = FALSE]
+
+# Normalization ####
+d <- calcNormFactors(d, method = "TMM")
+
+logCPM <- cpm(d, log=TRUE)
+
+# Filtering ####
+min_cpm <- 8
+min_samp <- 3
+i.filter <- rowSums(logCPM > log2(min_cpm)) >= min_samp
+d.filt <- d[i.filter, , keep.lib.sizes=F]
+d.filt <- calcNormFactors(d.filt)
+logCPM.filt <- cpm(d.filt, log = T, prior.count =2)
+
+knowngene.filt <- grep(knowngene_pat, rownames(logCPM.filt), value = TRUE)
+
+# Clustering ####
+mymds.filt <- plotMDS(logCPM.filt, top = 5000, labels = d$samples$Label, plot = FALSE)
+
+# Differential gene expression ####
+model0 <- model.matrix(~ 0 + Group,
+                       data = d.filt$samples)
+colnames(model0) <- sub("Group", "", colnames(model0))
+
+contrasts0 <- makeContrasts(BT - BC,
+                            AT - AC,
+                            BC - AC,
+                            (BT + AT) - (BC + AC),
+                            (BT + BC) - (AT + AC),
+                            (BT - BC) - (AT - AC),
+                            levels = model0)
+
+#put normalized values in EList object type
+e <- new("EList", list(E =logCPM.filt,
+                       genes=d.filt$genes, targets=d.filt$samples))
+
+# fit model
+fit0 <- lmFit(e, design = model0)
+
+fit1 <- eBayes(fit0, trend = TRUE )
+
+fit2 <- contrasts.fit(fit0, contrasts = contrasts0) %>% eBayes(trend = TRUE)
+
+# Heatmap for DGE ####
+siggenes <- rownames(topTable(fit2, number = Inf, p.value = 0.05))
+
+# not adjusted for tissue effect
+heatdata.orig <- logCPM.filt[siggenes,] %>% t() %>% scale() %>% t()
+colnames(heatdata.orig) <- d.filt$samples$Label
+```
+
+```{r export, eval = FALSE}
+# Gene counts
+temp <- match(allgenes, gtf1$gene_id)
+write.table(cbind(Gene = allgenes, Symbol = gtf1$gene[temp], Beebase = beebaseID[temp],
+                  countsmat_gene),
+            row.names = FALSE, sep = "\t",
+            file = "../stats/gene_counts_2022-06-27.txt")
+
+# export DGE results
+res.dge <- data.frame(Gene = row.names(d.filt$genes),
+                      d.filt$genes,
+                      AveExpr = fit1$Amean)
+
+for(coef in colnames(contrasts0)){
+  temp <- topTable(fit2, coef = coef, number = Inf)
+  colnames(temp) <- paste(colnames(temp), coef)
+  res.dge <- cbind(res.dge, temp[res.dge$Gene, c(3, 6, 7)])
+}
+
+temp <- topTable(fit2, number = Inf) # F-statistics
+colnames(temp) <- paste(colnames(temp), "ANOVA")
+res.dge <- cbind(res.dge, temp[res.dge$Gene, c("P.Value ANOVA", "adj.P.Val ANOVA")])
+
+res.dge$In_heatmap <- res.dge[["adj.P.Val ANOVA"]] < 0.05
+
+write.table(res.dge, file = "../stats/differential_gene_expression_results_2022-06-30.txt",
+            sep = "\t", row.names = FALSE)
+
+# export logCPM values
+write.table(cbind(Gene = row.names(d.filt$genes),
+                  d.filt$genes,
+                  logCPM.filt),
+            "../stats/filtered_logCPM_2022-06-30.txt",
+            sep = "\t", row.names = FALSE)
+
+# Glimma MA for DGE
+for(coef in colnames(contrasts0)){
+  glimmaMA(fit2, d.filt,
+           logCPM.filt,
+           groups = d.filt$samples$Group,
+           coef = coef, main = coef,
+           transform.counts = "none",
+           html = paste0("results/stats/glimma/glimma_MA_", coef, "_2022-06-30.html"))
+}
+```
+
+## Results files
+
+* `results/differential_gene_expression_results_2022-06-30.xlsx` has differential
+  gene expresion results.
+* `gene_counts_2022-06-27.xlsx` contains raw read counts summarized to gene.
+* `filtered_logCPM_2022-06-30.xlsx` contains normalized and filtered logCPM (log2(counts-per-million)) values.
+* `flair/2022-06-14` contains output directly from the flair software for
+calling isoforms from long read data.
+  - Files beginning with "All_samples_collapse.isoforms" document the isoforms
+  called by flair in terms of sequence and genomic location.
+  - Files beginning with "counts_matrix" contain the results of transcript
+  quantification by flair.
+
+Additionally, all scripts and code for the full analysis are available at
+https://github.com/sbresnahan/allele-specific-transcription-and-m6A.  
+
+## Study design
+
+This study seeks to use transcriptome data to understand behavioral differences
+between non-aggressive and aggressive honey bees.  Two crosses were made.
+Cross A had AHB as the female parent (SRR14654188) and EHB as the male parent
+(SRR14654189).  Cross B had EHB as the female parent (SRR14654186) and AHB as
+the male parent (SRR14654187).  Three or more aggressive bees and three or more
+non-aggressive bees (labeled C and T) were collected from each cross. Twelve
+head and abdomen samples, spanning multiple batches over the course of a year,
+were ultimately analyzed, with three samples per experimental group.
+RNA samples were sequenced with Oxford Nanopore Technology direct RNA sequencing on a FLO-MIN106 flowcell.
+
+In this report, I analyze differential gene expression.  
+
+## Sample processing
+
+FAST5 files from all samples were processed with Guppy 5.0.16 using the
+`rna_r9.4.1_70bps_hac.cfg` configuration (Oxford Nanopore Technologies)
+for base calling on a GPU.  FASTQ files labeled "pass" were concatenated
+together to generate one FASTQ per sample.
+[Minimap 2.21](https://github.com/lh3/minimap2)[^minimap2] was used for
+alignment to the
+[_Apis mellifera_ HAv3.1 reference genome](https://www.ncbi.nlm.nih.gov/genome/48?genome_assembly_id=403979)
+(plus common viral genomes) in splice-aware mode with a kmer length of 14,
+using the published gene annotation to guide alignment.
+[SAMtools 1.12](https://github.com/samtools/samtools)[^samtools] was used to
+sort and index the resulting BAM files.
+[Flair 1.5](https://github.com/BrooksLabUCSC/flair)[^flair] was then used to
+convert BAM files to BED format and correct intron-exon junctions based on
+the published annotation, then call isoforms across all samples.  These
+isoforms included published transcripts and genes as well as novel transcripts
+and genes.
+
+VCF files from Sean Bresnahan for the four parent bees (NCBI samples
+[SRR14654186](https://trace.ncbi.nlm.nih.gov/Traces/sra/?run=SRR14654186),
+[SRR14654187](https://trace.ncbi.nlm.nih.gov/Traces/sra/?run=SRR14654187),
+[SRR14654188](https://trace.ncbi.nlm.nih.gov/Traces/sra/?run=SRR14654188),
+and [SRR14654189](https://trace.ncbi.nlm.nih.gov/Traces/sra/?run=SRR14654189))
+were used together with the transcriptome output by flair to generate
+parent-specific transcriptomes using a custom R script.  For each cross,
+the two parental transcriptomes were combined, with identical transcripts
+being labeled "Both" and transcripts differing between parents being labeled
+with the parent ID.  Flair was then used separately for each cross to quantify 
+transcript abundance across samples.
+
+For differential gene expression analysis, counts were summed within genes regardless of parent ID or transcript ID, resulting in counts for `r scales::comma(nrow(countsmat_gene))` genes. Samples from both crosses were combined into one gene count matrix.
+
+Counts at the transcript level were not used in this analysis aside from quality
+control (_i.e._ tallying annotated vs. novel isoforms) but were used in a
+separate analysis of differential isoform expression.
+
+## Quality control
+
+Libraries varied considerably in overall size (Fig. 1) but were similar in
+quality (Fig. 2).  Two samples had low levels of viral contamination (Fig. 2).
+Most reads mapping to the nuclear
+genome mapped to annotated transcripts (Fig. 2).  Number of genes detected was
+linearly correlated with library size, indicating that saturation of gene
+detection was not reached (Fig. 3).  The A-C group, which consisted entirely
+of new samples from December 2021, had the smallest library size and lowest
+number of genes detected (Figs. 1 and 3).  As compared to the analysis from
+February, about 500 more genes were detected per sample (Fig. 3 in this report
+vs. previous).
+
+One major difference after the Flair bug was fixed in June 2022 was that
+samples from cross A had far fewer reads mapping to the mitochondrial genome
+than samples from cross B did (Figs. 1 and 2).  I determined that one of the
+novel nuclear genes called by Flair, NC_037641.1:1186000, was was highly
+similar in sequence to a region of the mitochondrial genome spanning the
+l-rRNA and ND1 genes.  For the EHB parents, the sequence of this nuclear
+region was distinct from the mitochondrial region, and mitochondrial reads
+mapped correctly.  However, for AHB parents, SNP calls in the VCF were applied
+very similarly to both the nuclear and mitochondrial regions, causing mitochondrial
+reads to be mapped incorrectly to the nuclear region.  These were bottom strand
+transcripts, which helps explain why this issue was not seen in the previous
+analysis when bottom strand transcripts contained incorrect sequence. I do not
+anticipate that this mismapping will cause issues downstream, particularly after
+filtering mitochondrial reads (see below).
+
+```{r fig01, fig.cap = "Fig. 1.  Library sizes expressed as number of aligned reads.", fig.width = 9, fig.height = 6}
+ggplot(targ_long, aes(x = Label, y = Reads, fill = Fate)) +
+  geom_col() +
+  scale_fill_manual(values = dittoSeq::dittoColors(1)) +
+  ggtitle("Read fates expressed as number of reads") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+```{r fig02, fig.cap = "Fig. 2.  Percentages of reads aligned to categories of transcripts.", fig.width = 9, fig.height = 6}
+ggplot(targ_long, aes(x = Label, y = Reads / Reads_aligned * 100, fill = Fate)) +
+  geom_col() +
+  scale_fill_manual(values = dittoSeq::dittoColors(1)) +
+  ggtitle("Read fates expressed as percentage of reads") +
+  labs(y = "Percentage") +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+```{r fig03, fig.cap = "Fig. 3. Number of genes detected vs. number of reads aligning to genes.  Only genes from the published annotation are considered.", fig.width = 7, fig.height = 7}
+ggplot(targets, aes(x = Reads_known_txpt_nuclear + Reads_known_gene_novel_isoform_nuclear,
+                    y = Known_genes_detected, fill = Group)) +
+  geom_point(size = 3, shape = 21, color = "black") +
+  geom_label_repel(aes(label = Label), color = "black", box.padding = 0.35) +
+  labs(x = "Reads aligning to annotated genes",
+       y = "Annotated genes detected",
+       title = "Saturation of gene detection") +
+  scale_fill_manual(values = colorkey)
+```
+
+## Mitochondrial reads
+
+The vast majority of reads mapping to mitochondrial transcripts mapped correctly
+to the mother in both crosses (Figs. 4 and 5).  Because of the mismapping of
+mitochondrial reads to the nuclear genome (NC_037641.1:1186000) in cross A, I
+excluded from downstream analysis all mitochondrial reads including those mapping
+to NC_037641.1:1186000.  I found that this filtering reduced variance in TMM
+normalization factors (data not shown).
+
+```{r fig04, fig.cap = "Fig. 4. Proportion of read assigned to the materinal mitochondrion (SRR14654188), paternal mitochondrion (SRR14654189) or mitochondrion of unknown parent (Both) in cross A. Reads assigned to gene NC_037641.1:1186000 are counted as mitochondrial."}
+data.frame(Parent = rownames(prop_mito_A),
+           prop_mito_A, check.names = FALSE) %>%
+  pivot_longer(starts_with("T"), names_to = "Sample",
+               values_to = "Proportion_mitochondrial_reads") %>%
+  ggplot(aes(x = Sample, fill = Parent, y = Proportion_mitochondrial_reads)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_fill_brewer(palette = "Dark2") +
+  ggtitle("Mitochondrial reads in cross A")
+```
+
+```{r fig05, fig.cap = "Fig. 5. Proportion of read assigned to the materinal mitochondrion (SRR14654186), paternal mitochondrion (SRR14654187) or mitochondrion of unknown parent (Both) in cross B. Reads assigned to gene NC_037641.1:1186000 are counted as mitochondrial."}
+data.frame(Parent = rownames(prop_mito_B),
+           prop_mito_B, check.names = FALSE) %>%
+  pivot_longer(starts_with("T"), names_to = "Sample",
+               values_to = "Proportion_mitochondrial_reads") %>%
+  ggplot(aes(x = Sample, fill = Parent, y = Proportion_mitochondrial_reads)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_fill_brewer(palette = "Dark2") +
+  ggtitle("Mitochondrial reads in cross B")
+```
+
+## Normalization and filtering
+
+When comparing expression levels, the numbers of reads per gene need to be normalized not only because of the differences in total number of reads, but because there could be differences in RNA composition such that the total number of reads would not be expected to be the same. The TMM (trimmed mean of M values) normalization[^tmm] in the [edgeR](https://bioconductor.org/packages/release/bioc/html/edgeR.html) package[^edger2] uses the assumption of *most genes do not change* to calculate a normalization factor for each sample to adjust for such biases in RNA composition. In this dataset, TMM normalization factors fluctuated between `r round(min(d$samples$norm.factors),2)` and `r round(max(d$samples$norm.factors),2)`. TMM normalization factors are multiplied by the library size in order to generate the effective library size, where smaller TMM normalization factors indicate more overrepresented genes in the sample. Normalization factors varied among samples but were not particularly associated with experimental group (Fig. 6).
+
+```{r fig06, fig.cap = "Fig. 6. TMM normalization factors pre-filtering."}
+ggplot(mapping = aes(x = d$samples$Label, y = d$samples$norm.factors,
+                     fill = d$samples$Group)) +
+  geom_col() + 
+  geom_hline(yintercept = 1, lty = 2) +
+  labs(x = "Sample", y = "Normalization factor", fill = "Group",
+       title = "TMM normalization factors pre-filtering") +
+  scale_fill_manual(values = colorkey) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+While the `flair collapse` output a total of `r scales::comma(nrow(d))` genes (after filtering mitochondrial genes), many of these might not have detectable expression in these samples. Therefore, we set the detection threshold at `r min_cpm` cpm (counts per million) in at least `r min_samp` samples, which resulted in `r scales::comma(sum(!i.filter))` genes being filtered out, leaving `r scales::comma(sum(i.filter))` genes to be analyzed for differential expression, containing `r scales::percent(sum(d.filt$counts) / sum(d$counts), 0.01)` of the reads. Of these genes, `r length(knowngene.filt)` were from the published annotation, representing `r scales::percent(sum(d$counts[knowngene.filt,]) / sum(d$counts), 0.01)` of reads prior to filtering.  This threshold resulted in a fairly even number of genes being detected across samples, considering the variability in library size (Fig. 7).  In a typical Illumina RNA-seq experiment, we might use 1 cpm as the filtering threshold.  Given the lower read depth of this experiment due to the use of Oxford Nanopore sequencing, a higher threshold was needed to differentiate between genes that could be detected in few samples vs. genes that could be detected in most samples.  I arrived at a threshold of `r min_cpm` by examining the detection rates at a variety of thresholds ranging from 4 to 12 (results not shown).
+
+After filtering, TMM normalization was performed again and normalized log2-based count per million values (logCPM) were calculated using edgeR's[^edger1] `cpm()` function with `prior.count = 2` to help stabilize fold-changes of extremely low expression genes.  TMM normalization factors after filtering are shown in Fig. 8, and compared to pre-filtering values in Fig. 9.
+
+The overall distribution of logCPM values differed by batch (Fig. 10).
+The peak on the left of Fig. 10 represents undetected genes, and thus is higher
+in batches later than November 2020 because those library sizes were smaller.
+
+```{r fig07, fig.cap = "Fig. 7. Number of detected genes passing the filtering threshold in each sample."}
+ggplot(mapping = aes(x = d$samples$Label, y = colSums(logCPM > log2(min_cpm)),
+                     fill = d$samples$Group)) +
+  geom_col() +
+  labs(x = "Sample", y = "Number of genes", fill = "Group",
+       title = paste0("Number of genes with >", min_cpm, " log counts per million")) +
+  scale_fill_manual(values = colorkey) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+```{r fig08, fig.cap = "Fig. 8. TMM normalization factors post-filtering."}
+ggplot(mapping = aes(x = d.filt$samples$Label, y = d.filt$samples$norm.factors,
+                     fill = d.filt$samples$Group)) +
+  geom_col() + 
+  geom_hline(yintercept = 1, lty = 2) +
+  labs(x = "Sample", y = "Normalization factor", fill = "Group",
+       title = "TMM normalization factors post-filtering") +
+  scale_fill_manual(values = colorkey) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+```{r fig09, fig.cap = "Fig. 9. Comparison of TMM normalization factors before and after filtering."}
+ggplot(mapping = aes(x = d$samples$norm.factors, y = d.filt$samples$norm.factors,
+                     fill = d$samples$Group)) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_label(aes(label = d$samples$Label)) +
+  labs(x = "TMM norm factors before filtering",
+       y = "TMM norm factors after filtering",
+       fill = "Group") +
+  scale_fill_manual(values = colorkey)
+```
+
+```{r fig10, fig.cap = "Fig. 10. Distribution of logCPM values after filtering."}
+plotDensities( logCPM.filt, group = d$samples$Batch, col = 1:4, legend="topright" )
+```
+
+## Sample clustering
+
+Multidimensional scaling in the [limma](https://bioconductor.org/packages/release/bioc/html/limma.html)[^limma] package was used to assess the largest effects on gene composition among samples. The normalized logCPM values of the top most 5,000 variable genes between each pair of samples were chosen to construct the multidimensional scaling plot.  The first axis separated the two crosses, while the second axis separated sample T3-Ag1:A2C from the rest and to a lesser extent separated C and T samples (Fig. 11).  Interactive MDS plots are also available in the files "MDSclustering_preFiltering_2022-06-30.html" and "MDSclustering_postFiltering_2022-06-30.html" in the folder of Glimma plots.
+
+```{r fig11, fig.cap = "Fig. 11. Multidimensional scaling of samples after filtering, using the top 5000 variable genes between each pair of samples.", fig.width = 7, fig.height = 5}
+ggplot(mapping = aes(x = mymds.filt$x, y = mymds.filt$y,
+                     fill = d.filt$samples$Group)) +
+  geom_label(aes(label = d.filt$samples$Label)) +
+  labs(fill = "Group",
+       x = paste0("Dim 1 (", round(mymds.filt$var.exp[1] * 100, 1),"%)"),
+       y = paste0("Dim 2 (", round(mymds.filt$var.exp[2] * 100, 1),"%)"),
+       title = "MDS after filtering") +
+  scale_fill_manual(values = colorkey)
+```
+
+## Differential gene expression
+
+Differential gene expression (DE) analysis was performed using the limma-trend method[^trend1].
+Multiple testing correction was done using the False Discovery Rate method[^fdr].
+The model run was:
+
+$Y = Group$
+
+where $Group$ refers to the AC, AT, BC, and BT groups.
+The following contrasts were then assessed:
+
+* **BT - BC**: Differences between T and C bees from the B cross
+* **AT - AC**: Differences between T and C bees from the A cross
+* **BC - AC**: Differences between B and A crosses, with C as the baseline
+* **(BT + AT) - (BC + AC)**: Differences between T and C bees across both crosses
+* **(BT + BC) - (AT + AC)**: Differences between crosses, looking at both C and T
+* **(BT - BC) - (AT - AC)**: Interaction effect; differential effect of cross on differences between T and C bees
+
+Numbers of significantly up- and down-regulated genes are shown in Table 1.
+Fewer genes were significant after fixing the Flair bug as compared to before
+fixing the bug.  However, nearly all significant genes were for differences
+between crosses, which could have been artificially inflated by the Flair bug,
+because alignment quality would have been better for some parents than for others
+depending on how many variants had been used to edit the transcript sequence.
+
+```{r table01}
+temp <- summary(decideTests(fit2))
+kable(temp,
+      caption = "Table 1. Number of gene significant for differential expression at FDR < 0.05.") %>%
+  kable_styling() %>% row_spec(c(1,3), bold = TRUE)
+```
+
+Results for all genes are listed in the file "differential_gene_expression_results_2022-06-30.xlsx".
+Files beginning with "glimma_MA" are interactive web applications for exploring
+the results.  Files are labelled "unadjusted" because no adjustment for tissue
+type was performed, unlike in an earlier report where there were two tissue types.
+
+## Heatmaps for differential gene expression
+
+Across all of the experimental groups contrasts, a one-way ANOVA was run in
+limma, identifying `r length(siggenes)`
+significant genes.  These genes were then plotted in a heatmap to summarize
+gross changes in gene expression across groups.  Most of the
+significant genes displayed consistent expression differences between cross A
+and cross B (Fig. 12).
+
+```{r fig12, fig.cap = "Fig. 12. Heatmap of 582 genes with FDR < 0.05 in one-way anova for effect of experimental group. Unadjusted expression values are shown.", fig.height = 9, fig.width = 7}
+hmap(heatdata.orig, scale = "none", col = plasma(36),
+     ColSideColors = colorkey[d.filt$samples$Group],
+     main = "Genes significant in ANOVA")
+```
+
+## Session info
+
+Information about R version and packages used to generate this report is listed
+below.
+
+```{r sessioninfo, results = "markdown"}
+sessionInfo()
+```
+
+
+## References
+
+[^R]: R Core Team (2017). R: A language and environment for statistical computing. R Foundation for Statistical Computing, Vienna, Austria. URL https://www.R-project.org/.
+
+[^tmm]: Robinson MD, Oshlack A (2010). A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biology 11, R25.
+
+[^limma]: Ritchie, M.E., Phipson, B., Wu, D., Hu, Y., Law, C.W., Shi, W., and Smyth, G.K. (2015). limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Research 43(7), e47.
+
+[^voom]: Law CW, Chen Y, Shi W, et al.: voom: Precision weights unlock linear model analysis tools for RNA-seq read counts. Genome Biol. 2014; 15(2): R29
+
+[^fdr]: Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. Journal of the Royal statistical society: series B (Methodological), 57(1), 289-300.
+
+[^voom]: Law, C. W., Chen, Y., Shi, W., & Smyth, G. K. (2014). voom: Precision weights unlock linear model analysis tools for RNA-seq read counts. Genome biology, 15(2), R29.
+
+[^treat]: McCarthy, D. J., & Smyth, G. K. (2009). Testing significance relative to a fold-change threshold is a TREAT. Bioinformatics, 25(6), 765-771.
+
+[^annohub]: Carlson M (2019). org.Mm.eg.db: Genome wide annotation for Mouse. R package version 3.8.2.
+
+[^bowtie2]: Langmead B, Salzberg S. Fast gapped-read alignment with Bowtie 2. Nature Methods. 2012, 9:357-359.
+
+[^trimmomatic]: Bolger, A. M., Lohse, M., & Usadel, B. (2014). Trimmomatic: a flexible trimmer for Illumina sequence data. Bioinformatics, 30(15), 2114-2120.
+
+[^trend1]: Chen Y, Lun ATL and Smyth GK. From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline [version 2; referees: 5 approved]. F1000Research 2016, 5:1438 (doi: 10.12688/f1000research.8987.2)
+
+[^tximport]: Soneson C, Love MI, Robinson MD (2015). "Differential analyses for RNA-seq: transcript-level estimates improve gene-level inferences." F1000Research, 4. doi: 10.12688/f1000research.7563.1.
+
+[^salmon]: Patro, R., Duggal, G., Love, M. I., Irizarry, R. A., & Kingsford, C. (2017). Salmon provides fast and bias-aware quantification of transcript expression. Nature methods, 14(4), 417.
+
+[^fastqc]: Andrews, S. (2010). FastQC: a quality control tool for high throughput sequence data. Available at: https://www.bioinformatics.babraham.ac.uk/projects/fastqc/
+
+[^multiqc]: Ewels, P., Magnusson, M., Lundin, S., & K?ller, M. (2016). MultiQC: summarize analysis results for multiple tools and samples in a single report. Bioinformatics, 32(19), 3047-3048.
+
+[^sva]: Leek JT, Johnson WE, Parker HS, Fertig EJ, Jaffe AE, Storey JD, Zhang Y, Torres LC (2019). sva: Surrogate Variable Analysis. R package version 3.32.0.
+
+[^bioc]: Huber W., Carey V.J., Gentleman R., ..., Morgan M. Orchestrating high-throughput genomic analysis with Bioconductor. Nature Methods, 2015:12, 115.
+
+[^edger1]: McCarthy DJ, Chen Y, Smyth GK (2012). "Differential expression analysis of multifactor RNA-Seq experiments with respect to biological variation." Nucleic Acids Research, 40(10), 4288-4297.
+
+[^edger2]: Robinson MD, McCarthy DJ, Smyth GK (2010). "edgeR: a Bioconductor package for differential expression analysis of digital gene expression data." Bioinformatics, 26(1), 139-140.
+
+[^edger3]: Chen Y, Lun ATL and Smyth GK. From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline [version 2; peer review: 5 approved]. F1000Research 2016, 5:1438 (https://doi.org/10.12688/f1000research.8987.2)
+
+[^ruvseq]: Risso D, Ngai J, Speed T, Dudoit S (2014). "Normalization of RNA-seq data using factor analysis of control genes or samples." Nature Biotechnology, 32(9), 896-902.
+
+[^star]: Dobin A, Davis CA, Schlesinger F, Drenkow J, Zaleski C, Jha S, Batut P, Chaisson M, Gingeras TR. STAR: ultrafast universal RNA-seq aligner. Bioinformatics. 2013 Jan 1;29(1):15-21. doi: 10.1093/bioinformatics/bts635. Epub 2012 Oct 25. PMID: 23104886; PMCID: PMC3530905.
+
+[^fc]: Liao Y, Smyth GK and Shi W. featureCounts: an efficient general-purpose program for assigning sequence reads to genomic features. Bioinformatics, 30(7):923-30, 2014.
+
+[^wgcna1]: Bin Zhang and Steve Horvath (2005) A General Framework for Weighted Gene Co-Expression Network Analysis. Statistical Applications in Genetics and Molecular Biology: Vol. 4: No. 1, Article 17 PMID: 16646834
+
+[^wgcna2]: Horvath, S. (2008). WGCNA: an R package for weighted correlation network analysis. BMC Bioinformatics., 9(1), 559. https://doi.org/10.1186/1471-2105-9-559
+
+[^go]: Young, M. D., Wakefield, M. J., Smyth, G. K., Oshlack, A. (2010). Gene ontology analysis for RNA-seq: accounting for selection bias. Genome Biology 11, R14. http://genomebiology.com/2010/11/2/R14
+
+[^minimap2]: Li, H. (2018). Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics, 34:3094-3100. doi:10.1093/bioinformatics/bty191
+
+[^flair]: Tang, A.D., Soulette, C.M., van Baren, M.J. et al. Full-length transcript characterization of SF3B1 mutation in chronic lymphocytic leukemia reveals downregulation of retained introns. Nat Commun 11, 1438 (2020). https://doi.org/10.1038/s41467-020-15171-6
+
+[^samtools]: Petr Danecek, James K Bonfield, Jennifer Liddle, John Marshall, Valeriu Ohan, Martin O Pollard, Andrew Whitwham, Thomas Keane, Shane A McCarthy, Robert M Davies, Heng Li (2021). Twelve years of SAMtools and BCFtools. GigaScience, Volume 10, Issue 2, giab008, https://doi.org/10.1093/gigascience/giab008

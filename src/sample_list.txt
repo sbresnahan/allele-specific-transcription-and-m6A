@@ -1,0 +1,17 @@
+1T	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/1T/20201209_1846_MN31747_FAM96346_e10e529d
+1Tb	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/1Tb/20210514_1637_MN31747_FAP84430_13fd3d67
+2C	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/2C/2C/20210426_2055_MN31747_FAQ05340_321eb355
+2T	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/2T/20210423_1758_MN31747_FAQ05341_a20df025
+3T	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/3T/20201207_2120_MN31747_FAM96346_76c2f419
+3Tb	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/3Tb/20210504_1600_MN31747_FAQ03537_101cecae
+5C	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/5C/20210428_1401_MN31747_FAQ06152_efdfee7b
+6C	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/6C/20201202_1610_MN31747_FAM94162_edc4338f
+A-2T	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/A-2T/20210623_1852_MN31747_FAQ25236_dd3db096
+B1T	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/B1T/20210603_1638_MN31747_FAQ25317_c7517e2b
+B3T	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/B3T/20210602_1723_MN31747_FAP84625_c488aa4b
+A2C	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/A2C/20210713_1842_MN31747_FAQ49623_ebc57043
+A2Tt	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/A2Tt/20210709_2002_MN31747_FAQ24491_b391f267
+A3Ct	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/A3Ct/20210910_1616_MN31747_FAR13048_26556a89
+A6Ct	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/A6Ct/20210715_2006_MN31747_FAP84625_55179837
+T2Ag1B8T	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/T2Ag1B8T/20210915_1759_MN31747_FAR09630_0200d406
+T2Ag1B9T	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/T2Ag1B9T/20210920_2026_MN31747_FAR09744_ebdfa1a2

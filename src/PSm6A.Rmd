@@ -1,0 +1,933 @@
+---
+title: "Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees: analysis of parent-of-origin allele-specific transcription and m6A, and their relationships to gene expression and isoform switching (analysis code markdown)"
+author: "Sean Bresnahan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+---
+
+# Requirements
+```{r,message=F}
+library(tidyverse)
+library(plyr)
+library(Rfast)
+library(tryCatchLog)
+library(lmerTest)
+library(car)
+library(viridis)
+library(gridExtra)
+library(kableExtra)
+library(doParallel)
+library(doSNOW)
+```
+
+------------------------------------------------------------------------
+
+# Datasets
+
+## Sample metadata
+
+```{r}
+metadata <- read.csv("src/metadata.csv")
+kbl(metadata) %>% kable_styling()
+```
+
+## Generate SNP:gene count matrices for each dataset
+
+### Transcription
+
+```{r, eval=F}
+# Load expression matrix
+SNP_counts <- read.table("results/coverage_matrix_2022-08-03.txt",sep="\t",header=T)
+# Load SNP:gene table
+SNPs <- SNP_counts[,c(1:5)]
+# Load list of lincRNA transcript IDs
+lincRNAs <- data.frame(Transcript=unique(read.table("results/lincRNA_txpts.txt")[,1]))
+## Generate pseudo GeneIDs for lincRNA transcripts
+lincRNAs$Gene <- paste0("GeneID:lincRNA_",seq.int(1,length(lincRNAs$Transcript),1))
+SNPs <- SNPs %>% left_join(lincRNAs,by="Transcript") %>% 
+  mutate(Gene=coalesce(Gene.y,Gene.x)) %>%
+  select(-Gene.x,-Gene.y)
+SNPs <- SNPs[,c(1,5,2,3,4)]
+rm(lincRNAs)
+# Get transcript IDs not associated with GeneIDs
+SNPs_gene <- SNPs %>% filter(str_detect(Gene, "Gene"))
+SNPs_noGene <- data.frame(Gene=unique(SNPs[!SNPs$Transcript%in%SNPs_gene$Transcript,"Gene"]))
+rm(SNPs_gene)
+## Generate pseudo GeneIDs for novel genes
+SNPs_noGene$newGeneID <- paste0("GeneID:novel_",seq.int(1,length(SNPs_noGene$Gene),1))
+SNPs <- SNPs %>% left_join(SNPs_noGene,by="Gene") %>% 
+  mutate(Gene=coalesce(newGeneID,Gene)) %>%
+  select(-newGeneID)
+rm(SNPs_noGene)
+# Generate SNP IDs based on Chromosome and Genomic_pos
+SNPs$SNP_pos <- paste(SNPs$Chromosome,SNPs$Genomic_pos,sep=":")
+SNP.list <- data.frame(SNP_pos=unique(SNPs$SNP_pos),
+                       SNP=c(1:length(unique(SNPs$SNP_pos))))
+SNP.list$SNP <- paste("snp",SNP.list$SNP,sep="_")
+SNPs <- SNPs %>% left_join(SNP.list,by="SNP_pos")
+rm(SNP.list)
+# Simplify transcript IDs
+tx.list <- data.frame(Transcript=unique(SNP_counts$Transcript),
+                      tx.ID=c(1:length(unique(SNP_counts$Transcript))))
+tx.list$tx.ID <- paste("tx",tx.list$tx.ID,sep="_")
+SNPs <- SNPs %>% left_join(tx.list,by="Transcript")
+rm(tx.list)
+# Combine GeneIDs and transcript IDs
+SNPs$Gene <- paste(sapply(strsplit(SNPs$Gene, split = ":"), "[", 2 ),SNPs$tx.ID,sep=".")
+# Combine new GeneIDs with SNP IDs
+SNPs$Gene <- paste(SNPs$SNP,SNPs$Gene,sep=":")
+# Replace count matrix GeneIDs with new GeneIDs
+SNP_counts$Gene <- SNPs$Gene
+rm(SNPs)
+# Clean up
+row.names(SNP_counts) <- SNP_counts$Gene
+write.csv(SNP_counts[,c(1:5)],"results/SNP_gene_tx_IDs.csv")
+SNP_counts[,c(1:5)] <- NULL
+SNP_counts[is.na(SNP_counts)] <- 0
+names(SNP_counts) <- gsub("[.]", "-", names(SNP_counts))
+# Save count matrix to file
+write.csv(SNP_counts,"results/EHBxAHB_PS_expression.csv")
+```
+
+```{r, echo=F}
+SNP_counts <- read.csv("results/EHBxAHB_PS_expression.csv",row.names=1)
+names(SNP_counts) <- gsub("[.]", "-", names(SNP_counts))
+```
+
+### RNA m6A
+
+```{r, eval=F}
+# Load RNA m6A probability matrix
+SNP_m6A <- read.table("results/probM_matrix_2022-08-03.txt",sep="\t",header=T)[-c(1:5)]
+# Rows and columns are the same as SNP_counts
+row.names(SNP_m6A) <- row.names(SNP_counts)
+names(SNP_m6A) <- names(SNP_counts)
+# Clean up
+SNP_m6A[is.na(SNP_m6A)] <- 0
+# Write RNA m6A probability matrix to file
+write.csv(SNP_m6A,"results/EHBxAHB_PS_m6A.csv")
+```
+
+```{r, echo=F}
+SNP_m6A <- read.csv("results/EHBxAHB_PS_m6A.csv",row.names=1)
+names(SNP_m6A) <- gsub("[.]", "-", names(SNP_m6A))
+```
+
+------------------------------------------------------------------------
+
+# Parent-of-origin allele-specific transcription
+
+## Preprocess count matrices
+
+### Split count matrices by phenotype
+
+```{r}
+unresponsive.IDs <- metadata[metadata$phenotype=="unresponsive","sample.id"]
+unresponsive_counts <- SNP_counts[,names(SNP_counts)%in%unresponsive.IDs]
+
+responsive.IDs <- metadata[metadata$phenotype=="responsive","sample.id"]
+responsive_counts <- SNP_counts[,names(SNP_counts)%in%responsive.IDs]
+```
+
+### Filter low-count SNPs
+```{r, eval=F}
+# Function to filter SNPs
+filter.SNPs <- function(counts,metadata,lcf){
+  # Remove rows with < lcf counts counts by cross
+  LA <- metadata[metadata$lineage=="A","sample.id"]
+  LB <- metadata[metadata$lineage=="B","sample.id"]
+  counts <- counts[rowSums(counts[,names(counts)%in%LA])>lcf,]
+  counts <- counts[rowSums(counts[,names(counts)%in%LB])>lcf,]
+  # Remove rows with greater than 10000 counts (cannot run SK test on these)
+  counts$SUM <- rowSums(counts)
+  counts <- counts[counts$SUM<10000,]
+  counts$SUM <- NULL
+  # Remove rows with duplicate counts and with < 2 SNPs
+  counts$gene <- as.character(map(strsplit(row.names(counts), split = ":"), 2))
+  genelist <- unique(counts$gene)
+  delete.rows <- list()
+  for(i in 1:length(genelist)){
+    tmp <- counts[counts$gene==genelist[i],]
+    tmp <- tmp[!duplicated(tmp),]
+    if(length(row.names(tmp))<2){append(delete.rows,genelist[i])}
+  }
+  counts <- counts[!counts$gene%in%unlist(delete.rows),]
+  counts$gene <- NULL
+  # Return filtered counts
+  return(counts)
+}
+```
+
+```{r, eval=F}
+unresponsive_counts <- filter.SNPs(unresponsive_counts,metadata,9)
+write.csv(unresponsive_counts,"results/EHBxAHB_unresponsive_counts.csv")
+responsive_counts <- filter.SNPs(responsive_counts,metadata,9)
+write.csv(responsive_counts,"results/EHBxAHB_responsive_counts.csv")
+```
+
+```{r,echo=F}
+unresponsive_counts <- read.csv("results/EHBxAHB_unresponsive_counts.csv",row.names=1)
+names(unresponsive_counts) <- gsub("[.]", "-", names(unresponsive_counts))
+responsive_counts <- read.csv("results/EHBxAHB_responsive_counts.csv",row.names=1)
+names(responsive_counts) <- gsub("[.]", "-", names(responsive_counts))
+```
+
+## Conduct statistical tests
+
+### Conduct Storer-Kim test at each tx:SNP
+
+```{r, eval=F}
+# Storer-Kim test
+## (Function from the WRS2 package). Test the hypothesis that two independent binomials have equal probability of success.
+## Modified for efficiency: changed outer() command to Rfast::Outer()
+twobinom<-function(r1=sum(elimna(x)),n1=length(x),
+                   r2=sum(elimna(y)),n2=length(y),
+                   x=NA,y=NA,alpha=.05){
+  n1p<-n1+1
+  n2p<-n2+1
+  n1m<-n1-1
+  n2m<-n2-1
+  q <- r1/n1
+  p <- r2/n2
+  if(is.na(q)){q <- 0}
+  if(is.na(p)){p <- 0}
+  chk<-abs(q-p)
+  x<-c(0:n1)/n1
+  suppressWarnings(if(is.na(x)){x <- 0})
+  y<-c(0:n2)/n2
+  suppressWarnings(if(is.na(y)){y <- 0})
+  phat<-(r1+r2)/(n1+n2)
+  m1<-t(Outer(x,y,"-"))
+  m2<-matrix(1,n1p,n2p)
+  flag<-(abs(m1)>=chk)
+  m3<-m2*flag
+  rm(m1,m2,flag)
+  xv<-c(1:n1)
+  yv<-c(1:n2)
+  xv1<-n1-xv+1
+  yv1<-n2-yv+1
+  dis1<-c(1,pbeta(phat,xv,xv1))
+  dis2<-c(1,pbeta(phat,yv,yv1))
+  pd1<-NA
+  pd2<-NA
+  for(i in 1:n1){pd1[i]<-dis1[i]-dis1[i+1]}
+  for(i in 1:n2){pd2[i]<-dis2[i]-dis2[i+1]}
+  pd1[n1p]<-phat^n1
+  pd2[n2p]<-phat^n2
+  m4<-t(Outer(pd1,pd2,"*"))
+  test<-sum(m3*m4)
+  rm(m3,m4)
+  list(p.value=test,p1=q,p2=p,est.dif=q-p)
+}
+```
+
+```{r, eval=F}
+# Wrapper for Storer-Kim test
+PSGE.SK <- function(counts,metadata,phenotype,cores){
+  pat.exp <- counts[,metadata[metadata$parent%in%c("D")&metadata$phenotype==phenotype,"sample.id"]]
+  mat.exp <- counts[,metadata[metadata$parent%in%c("Q")&metadata$phenotype==phenotype,"sample.id"]]
+  registerDoParallel(cores=cores)
+  i.len=length(row.names(pat.exp))
+  writeLines(c(""), "SKlog.txt")
+  sink("SKlog.txt", append=TRUE)
+  return.df <- foreach(i=1:i.len, .combine=rbind, 
+                       .export=ls(globalenv()),.packages="Rfast") %dopar% {
+    cat(paste("Row ",paste(paste0(paste0(i," of "),i.len),Sys.time()," "),"\n"))
+    SNP_gene=row.names(pat.exp[i,])
+    p1.s=sum(pat.exp[i,])
+    p2.s=sum(mat.exp[i,])
+    p.o=sum(p1.s,p2.s)
+    test=twobinom(r1=p1.s,n1=p.o,r2=p2.s,n2=p.o)$p.value
+    return.append=data.frame(SNP_gene=SNP_gene,p=test)
+    return(return.append)
+  }
+  sink()
+  return.df=return.df[match(row.names(pat.exp), return.df$SNP_gene),]
+  return(return.df)
+}
+```
+
+```{r, eval=F}
+unresponsive.SK <- PSGE.SK(unresponsive_counts,metadata,"unresponsive",2)
+write.csv(unresponsive.SK,"results/EHBxAHB_unresponsiveSK.csv", row.names=F)
+
+responsive.SK <- PSGE.SK(responsive_counts,metadata,"responsive",2)
+write.csv(responsive.SK,"results/EHBxAHB_responsiveSK.csv", row.names=F)
+```
+
+```{r, echo=F}
+unresponsive.SK <- read.csv("results/EHBxAHB_unresponsiveSK.csv")
+responsive.SK <- read.csv("results/EHBxAHB_responsiveSK.csv")
+```
+
+### Conduct GLIMMIX test for each transcript
+
+```{r, eval=F}
+# General linear mixed effects model
+## Requires tryCatchLog package!
+PSGE.GLIMMIX <- function(counts,metadata,cores){
+  counts$SNP_gene <- row.names(counts)
+  counts$geneID <- as.character(unlist(map(strsplit(counts$SNP_gene, split = ":"), 2)))
+  genelist <- unique(counts$geneID)
+  registerDoParallel(cores=cores)
+  writeLines(c(""), "GLIMMIXlog.txt")
+  i.len <- length(genelist)
+  sink("GLIMMIXlog.txt", append=TRUE)
+  df.out <- foreach(i=1:i.len,.combine=rbind) %dopar% {
+    cat(paste("Row ",paste(paste0(paste0(i," of "),i.len),Sys.time()," "),"\n"))
+    counts.sub <- counts[counts$geneID==genelist[i],]
+    counts.sub$geneID <- NULL
+    counts.sub <- gather(counts.sub, sample.id, count, 
+                         names(counts.sub), -SNP_gene, factor_key=TRUE)
+    counts.sub <- join(counts.sub, metadata, by = "sample.id")
+    counts.sub$parent <- as.factor(str_sub(counts.sub$parent,-1,-1))
+    counts.sub$SNP_gene <- as.factor(counts.sub$SNP_gene)
+    counts.sub$lineage <- as.factor(counts.sub$lineage)
+    counts.sub$individual <- as.factor(counts.sub$individual)
+    testfail <- F
+    test <- "null"
+    tryCatchLog(test <- lmer(count~parent+lineage+parent*lineage+(1|SNP_gene)+(1|individual),
+                             data=counts.sub), error = function(e) {testfail <- T})
+    if(class(test)=="character"){testfail <- T}
+    if(testfail==F){
+      test <- summary(test)
+      parent.p.list <- test[["coefficients"]][2,5]
+      cross.p.list <- test[["coefficients"]][3,5]
+      parent.cross.p.list <- test[["coefficients"]][4,5]
+    }else{
+      parent.p.list <- 1
+      cross.p.list <- 1
+      parent.cross.p.list <- 1
+    }
+    return(data.frame(ID=genelist[i],
+                      parent.p=parent.p.list,
+                      cross.p=cross.p.list,
+                      parentXcross.p=parent.cross.p.list))
+  }
+  sink()
+  return(df.out)
+}
+```
+
+```{r, eval=F}
+unresponsive.GLIMMIX <- PSGE.GLIMMIX(unresponsive_counts,metadata,2)
+write.csv(unresponsive.GLIMMIX,"results/EHBxAHB_unresponsiveGLIMMIX.csv", row.names=F)
+
+responsive.GLIMMIX <- PSGE.GLIMMIX(responsive_counts,metadata,2)
+write.csv(responsive.GLIMMIX,"results/EHBxAHB_responsiveGLIMMIX.csv", row.names=F)
+```
+
+```{r, echo=F}
+unresponsive.GLIMMIX <- read.csv("results/EHBxAHB_unresponsiveGLIMMIX.csv")
+responsive.GLIMMIX <- read.csv("results/EHBxAHB_responsiveGLIMMIX.csv")
+```
+
+## Assess test results for each gene
+
+```{r, eval=F}
+# Function for handling PSGE analysis
+PSGE.analysis <- function(counts,phenotype,metadata,SK,GLIMMIX){
+  # Split count matrices by cross and parent of origin for plotting
+  p1.pat <- counts[,metadata[metadata$parent%in%c("D")&
+                               metadata$lineage=="B"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  p1.mat <- counts[,metadata[metadata$parent%in%c("Q")&
+                               metadata$lineage=="B"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  p2.pat <- counts[,metadata[metadata$parent%in%c("D")&
+                               metadata$lineage=="A"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  p2.mat <- counts[,metadata[metadata$parent%in%c("Q")&
+                               metadata$lineage=="A"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  # Set up a data.frame to plot %p1 and %p2 for each SNP
+  p1.plot <- data.frame(rowSums(p1.pat)/(rowSums(p1.mat)+rowSums(p1.pat)))
+  names(p1.plot) <- c("p1")
+  p1.plot[is.nan(p1.plot$p1),"p1"] <- 0
+  p2.plot <- data.frame(rowSums(p2.mat)/(rowSums(p2.mat)+rowSums(p2.pat)))
+  names(p2.plot) <- c("p2")
+  p2.plot[is.nan(p2.plot$p2),"p2"] <- 0
+  plot <- cbind(p1.plot,p2.plot)
+  # Join results of Storer-Kim tests
+  plot <- plot[row.names(plot)%in%SK$SNP_gene,]
+  plot$SK.p <- SK$p
+  plot$SNP_gene <- row.names(plot)
+  plot$gene <- as.character(map(strsplit(plot$SNP_gene, split = ":"), 2))
+  # Prep GLIMMIX results for downstream analyses
+  GLIMMIX.biased <- data.frame(gene=GLIMMIX$ID,parent.p=GLIMMIX$parent.p,
+                               cross.p=GLIMMIX$cross.p,parentXcross.p=GLIMMIX$parentXcross.p)
+  # Correct for multiple testing
+  plot$SK.padj <- p.adjust(plot$SK.p,"BH")
+  plot$bias <- "NA"
+  GLIMMIX$parent.padj <- p.adjust(GLIMMIX$parent.p,"BH")
+  GLIMMIX$cross.padj <- p.adjust(GLIMMIX$cross.p,"BH")
+  GLIMMIX$parentXcross.padj <- p.adjust(GLIMMIX$parentXcross.p,"BH")
+  GLIMMIX.biased <- GLIMMIX[GLIMMIX$parent.padj<0.05|GLIMMIX$cross.padj<0.05,1]
+  GLIMMIX.biased <- setdiff(GLIMMIX.biased,GLIMMIX[GLIMMIX$parentXcross.padj<0.05,1])
+  # For each gene, check whether all SNPs are biased in the same direction
+  for(i in 1:length(row.names(plot))){
+    p <- plot[i,"SK.padj"]
+    p1 <- plot[i,"p1"]
+    p2 <- plot[i,"p2"]
+    if(p<0.05&p1>0.6&p2<0.4){plot[i,"bias"] <- "pat"}
+    if(p<0.05&p1<0.4&p2>0.6){plot[i,"bias"] <- "mat"}
+    if(p<0.05&p1<0.4&p2<0.4){plot[i,"bias"] <- "EHB"}
+    if(p<0.05&p1>0.6&p2>0.6){plot[i,"bias"] <- "AHB"}
+  }
+  biaslist <- data.frame(matrix(ncol=2,nrow=0))
+  names(biaslist) <- c("gene","bias")
+  genelist <- unique(plot$gene)
+  for(i in 1:length(genelist)){
+    tmp <- unique(plot[plot$gene==genelist[i],"bias"])
+    if(length(tmp)>1){
+      if(length(tmp)==2){
+        if(any(tmp%in%"NA")){
+          bias <- tmp[!tmp%in%"NA"]
+        }
+      }else{
+        bias <- "NA"
+      }
+    }else{bias <- tmp}
+    biaslist <- rbind(biaslist,data.frame(gene=genelist[[i]], bias=bias))
+  }
+  plot <- plot %>% left_join(biaslist, by = c('gene' = 'gene')) 
+  names(plot)[c(7:8)] <- c("xbias","bias")
+  plot$bias.plot <- "NA"
+  for(i in 1:length(row.names(plot))){
+    p1 <- plot$p1[i]
+    p2 <- plot$p2[i]
+    bias <- plot$bias[i]
+    if(!bias=="NA"){
+      if(bias=="pat"){if(p1>0.6&p2<0.4){plot[i,"bias.plot"]<- "pat"}}
+      if(bias=="mat"){if(p1<0.4&p2>0.6){plot[i,"bias.plot"] <- "mat"}}
+      if(bias=="EHB"){if(p1<0.4&p2<0.4){plot[i,"bias.plot"] <- "EHB"}}
+      if(bias=="AHB"){if(p1>0.6&p2>0.6){plot[i,"bias.plot"] <- "AHB"}}
+    }
+  }
+  plot[!plot$gene%in%GLIMMIX.biased,"bias.plot"] <- "NA" 
+  plot <- rbind(plot[plot$bias.plot%in%c("NA"),],
+                plot[plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+  plot$bias.plot <- factor(plot$bias.plot,
+                           levels = c("NA","mat", "AHB", "EHB", "pat"))
+  return(plot)
+}
+```
+
+```{r,eval=F}
+unresponsive.plot <- PSGE.analysis(unresponsive_counts,"unresponsive",metadata,
+                                   unresponsive.SK,unresponsive.GLIMMIX)
+write.csv(unresponsive.plot,"results/EHBxAHB_unresponsive_PSGE.csv",row.names=F)
+
+responsive.plot <- PSGE.analysis(responsive_counts,"responsive",metadata,
+                                 responsive.SK,responsive.GLIMMIX)
+write.csv(responsive.plot,"results/EHBxAHB_responsive_PSGE.csv",row.names=F)
+```
+
+## Plot data for each phenotype
+
+```{r}
+PSGE.plot <- function(data,title){
+  g <- ggplot(data, aes(x=p1, y=p2,
+                        color=bias.plot,alpha=0.25)) + 
+    geom_point(size=1.5) + theme_classic() +
+    xlab(expression(paste("% A allele in ",E[mother],
+                          " x ",A[father],sep=""))) +
+    ylab(expression(paste("% A allele in ",A[mother],
+                          " x ",E[father],sep=""))) +
+    ggtitle(title) +
+    theme(text = element_text(size=18),
+          plot.title = element_text(hjust = 0.5)) +
+    scale_color_manual(breaks = levels(unresponsive.plot$bias.plot),
+                       values=c("grey90","#000000","#009e73","#e69f00",
+                                "#56b4e9")) +
+    guides(alpha=F, color=F) +
+    scale_x_continuous(limits = c(0, 1), breaks = seq(0, 1, .2)) +
+    scale_y_continuous(limits = c(0, 1), breaks = seq(0, 1, .2))
+  return(g)
+}
+```
+
+```{r, echo = F}
+unresponsive.plot <- read.csv("results/EHBxAHB_unresponsive_PSGE.csv")
+unresponsive.plot[is.na(unresponsive.plot$xbias),"xbias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias),"bias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias.plot),"bias.plot"] <- "NA"
+unresponsive.plot <- rbind(unresponsive.plot[unresponsive.plot$bias.plot%in%c("NA"),],
+                      unresponsive.plot[unresponsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+unresponsive.plot$bias.plot <- factor(unresponsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+```
+
+```{r}
+g1 <- PSGE.plot(unresponsive.plot,"Non-aggressive workers")
+g1
+```
+
+```{r, echo = F}
+responsive.plot <- read.csv("results/EHBxAHB_responsive_PSGE.csv")
+responsive.plot[is.na(responsive.plot$xbias),"xbias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias),"bias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias.plot),"bias.plot"] <- "NA"
+responsive.plot <- rbind(responsive.plot[responsive.plot$bias.plot%in%c("NA"),],
+                      responsive.plot[responsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+responsive.plot$bias.plot <- factor(responsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+```
+
+```{r}
+g2 <- PSGE.plot(responsive.plot,"Aggressive workers")
+g2
+```
+
+## Final plot
+
+### Make center grid
+
+```{r}
+triplot.plot <- function(unresponsive.plot,responsive.plot,label.A,label.B,allgenes){
+  gmid.df <- data.frame(Unresponsive=c(length(unique(unresponsive.plot[unresponsive.plot$bias.plot=="mat","gene"])),
+                                       length(unique(unresponsive.plot[unresponsive.plot$bias.plot=="AHB","gene"])),
+                                       length(unique(unresponsive.plot[unresponsive.plot$bias.plot=="EHB","gene"])),
+                                       length(unique(unresponsive.plot[unresponsive.plot$bias.plot=="pat","gene"]))),
+                        Bias=c("mat","AHB","EHB","pat"),
+                        Responsive=c(length(unique(responsive.plot[responsive.plot$bias.plot=="mat","gene"])),
+                                     length(unique(responsive.plot[responsive.plot$bias.plot=="AHB","gene"])),
+                                     length(unique(responsive.plot[responsive.plot$bias.plot=="EHB","gene"])),
+                                     length(unique(responsive.plot[responsive.plot$bias.plot=="pat","gene"]))))
+  
+  ## Test if # of unresponsive biased genes is different from responsive biased genes
+  mat.test <- chisq.test(data.frame(Success=c(gmid.df[1,1],gmid.df[1,3]),
+                                    Failure=c(length(allgenes)-gmid.df[1,1],
+                                              length(allgenes)-gmid.df[1,3]),
+                                    row.names=c("unresponsive","responsive")))$p.value
+  AHB.test <- chisq.test(data.frame(Success=c(gmid.df[2,1],gmid.df[2,3]),
+                                    Failure=c(length(allgenes)-gmid.df[2,1],
+                                              length(allgenes)-gmid.df[2,3]),
+                                    row.names=c("unresponsive","responsive")))$p.value
+  EHB.test <- chisq.test(data.frame(Success=c(gmid.df[3,1],gmid.df[3,3]),
+                                    Failure=c(length(allgenes)-gmid.df[3,1],
+                                              length(allgenes)-gmid.df[3,3]),
+                                    row.names=c("unresponsive","responsive")))$p.value
+  pat.test <- chisq.test(data.frame(Success=c(gmid.df[4,1],gmid.df[4,3]),
+                                    Failure=c(length(allgenes)-gmid.df[4,1],
+                                              length(allgenes)-gmid.df[4,3]),
+                                    row.names=c("unresponsive","responsive")))$p.value
+  ## Build table
+  gmid.df$`.` <- c(mat.test,AHB.test,EHB.test,pat.test)
+  gmid.df <- gmid.df[,c(4,1,2,3)]
+  nsrows <- row.names(gmid.df[gmid.df$`.`>0.05,])
+  gmid.df$`.` <- formatC(gmid.df$`.`, format = "e", digits = 2)
+  gmid.df[nsrows,"."] <- "(ns)"
+  gmid.df <- gmid.df[,c(2,3,4,1)]
+  cols <- matrix("black", nrow(gmid.df), ncol(gmid.df))
+  cols[1,2] <- "#000000"
+  cols[2,2] <- "#009e73"
+  cols[3,2] <- "#e69f00"
+  cols[4,2] <- "#56b4e9"
+  ccols <- matrix("white", nrow(gmid.df), ncol(gmid.df))
+  ccols[1,3] <- "#f4efea"
+  ccols[2,3] <- "#f4efea"
+  ccols[3,3] <- "#f4efea"
+  ccols[4,3] <- "#f4efea"
+  ccols[1,1] <- "#f4efea"
+  ccols[2,1] <- "#f4efea"
+  ccols[3,1] <- "#f4efea"
+  ccols[4,1] <- "#f4efea"
+  ccols[1,2] <- "#e4d8d1"
+  ccols[2,2] <- "#e4d8d1"
+  ccols[3,2] <- "#e4d8d1"
+  ccols[4,2] <- "#e4d8d1"
+  cfonts <- matrix("plain", nrow(gmid.df), ncol(gmid.df))
+  cfonts[1,2] <- "bold"
+  cfonts[2,2] <- "bold"
+  cfonts[3,2] <- "bold"
+  cfonts[4,2] <- "bold"
+  names(gmid.df) <- c(label.A,"Bias",label.B,".")
+  gmid.df[2,2] <- "AHB"
+  gmid.df[3,2] <- "EHB"
+  tt <- ttheme_default(core=list(fg_params = list(col = cols, 
+                                                  cex = 1,
+                                                  fontface = cfonts),
+                                 bg_params = list(col=NA,
+                                                  fill = ccols),
+                                 padding.h=unit(2, "mm")),
+                       rowhead=list(bg_params = list(col=NA)),
+                       colhead=list(bg_params = list(fill = c("#f4efea",
+                                                              "#e4d8d1",
+                                                              "#f4efea",
+                                                              "white")),
+                                    fg_params = list(rot=90,
+                                                     cex = 1,
+                                                     col = c("black",
+                                                             "black",
+                                                             "black",
+                                                             "white"))))
+  
+  gmid <- tableGrob(gmid.df, rows = NULL, theme=tt)
+  return(gmid)
+}
+```
+
+```{r}
+allgenes <- read.table("src/Amel_HAv3.1_genes.bed",header=F)[,c(4)]
+triplot <- triplot.plot(unresponsive.plot,
+                        responsive.plot,
+                        "Non-aggressive",
+                        "Aggressive",
+                        allgenes)
+plot(triplot)
+```
+
+### Join plots
+
+```{r, eval=F}
+fig1 <- arrangeGrob(g1, triplot, g2, widths=c(5,2.5,5))
+ggsave(file="results/AHBxEHB.png", plot=fig1, width=15, height=6)
+```
+
+```{r, echo=F, out.width="linewidth",fig.align="center"}
+knitr::include_graphics("results/AHBxEHB.png")
+```
+
+------------------------------------------------------------------------
+
+# Parent-of-origin allele-specific RNA m6A
+
+## Preprocess count matrices
+
+### Split RNA m6A probability matrix by phenotype
+
+Subset `SNP_counts` by unresponsive and responsive phenotypes: split by column names in `metadata` under `sample.id` by `phenotype`.
+
+```{r, eval=F}
+unresponsive.IDs <- metadata[metadata$phenotype=="unresponsive","sample.id"]
+responsive.IDs <- metadata[metadata$phenotype=="responsive","sample.id"]
+
+unresponsive_m6A <- SNP_m6A[,names(SNP_m6A)%in%unresponsive.IDs]
+responsive_m6A <- SNP_m6A[,names(SNP_m6A)%in%responsive.IDs]
+```
+
+### Filter low-count SNPs (match row names with count matrices)
+
+```{r, eval=F}
+unresponsive_m6A <- unresponsive_m6A[row.names(unresponsive_m6A)%in%row.names(unresponsive_counts),]
+responsive_m6A <- responsive_m6A[row.names(responsive_m6A)%in%row.names(responsive_counts),]
+```
+
+### Split count matrices by parent of origin for testing
+
+```{r, eval=F}
+unresponsive.pat.m6A <- unresponsive_m6A[,metadata[metadata$parent%in%c("D")&
+                                         metadata$phenotype=="unresponsive","sample.id"]]
+
+unresponsive.pat <- unresponsive_counts[,metadata[metadata$parent%in%c("D")&
+                                         metadata$phenotype=="unresponsive","sample.id"]]
+
+unresponsive.mat.m6A <- unresponsive_m6A[,metadata[metadata$parent%in%c("Q")&
+                                         metadata$phenotype=="unresponsive","sample.id"]]
+
+unresponsive.mat <- unresponsive_counts[,metadata[metadata$parent%in%c("Q")&
+                                         metadata$phenotype=="unresponsive","sample.id"]]
+
+responsive.pat.m6A <- responsive_m6A[,metadata[metadata$parent%in%c("D")&
+                                     metadata$phenotype=="responsive","sample.id"]]
+
+responsive.pat <- responsive_counts[,metadata[metadata$parent%in%c("D")&
+                                     metadata$phenotype=="responsive","sample.id"]]
+
+responsive.mat.m6A <- responsive_m6A[,metadata[metadata$parent%in%c("Q")&
+                                     metadata$phenotype=="responsive","sample.id"]]
+
+responsive.mat <- responsive_counts[,metadata[metadata$parent%in%c("Q")&
+                                     metadata$phenotype=="responsive","sample.id"]]
+```
+
+------------------------------------------------------------------------
+
+## Conduct two-tailed unpooled Z-test at each parent SNP
+
+```{r, eval=F}
+ztest.df <- function(pat.m6A,pat.exp,
+                     mat.m6A,mat.exp){
+  i.len <- length(row.names(pat.exp))
+  return.list <- list()
+  for(i in 1:i.len){
+    SNP_gene <- row.names(pat.exp[i,])
+    pm <- mean(as.numeric(pat.m6A[i,]))
+    pe <- mean(as.numeric(pat.exp[i,]))
+    mm <- mean(as.numeric(mat.m6A[i,]))
+    me <- mean(as.numeric(mat.exp[i,]))
+    sigmaHatD <- sqrt(((pm*(1-pm))/pe)+((mm*(1-mm))/me))
+    z <- abs((pm-mm)/sigmaHatD)
+    test <- 2*pnorm(q=z, lower.tail=F)
+    return.df <- data.frame(SNP_gene=SNP_gene,p=test)
+    return.list[[i]] <- return.df
+  }
+  return(bind_rows(return.list))
+}
+```
+
+```{r, eval=F}
+unresponsive.Z <- ztest.df(unresponsive.pat.m6A,
+                           unresponsive.pat,
+                           unresponsive.mat.m6A,
+                           unresponsive.mat)
+unresponsive.Z[is.na(unresponsive.Z)] <- 1
+write.csv(unresponsive.Z,"results/EHBxAHB_unresponsiveZ.csv", row.names=F)
+
+responsive.Z <- ztest.df(responsive.pat.m6A,
+                         responsive.pat,
+                         responsive.mat.m6A,
+                         responsive.mat)
+responsive.Z[is.na(responsive.Z)] <- 1
+write.csv(responsive.Z,"results/EHBxAHB_responsiveZ.csv", row.names=F)
+```
+
+```{r, echo=F}
+unresponsive.Z <- read.csv("results/EHBxAHB_unresponsiveZ.csv")
+responsive.Z <- read.csv("results/EHBxAHB_responsiveZ.csv")
+```
+
+<br>
+
+------------------------------------------------------------------------
+
+## Assess test results for each gene
+
+```{r, eval=F}
+# Function for handling PSm6A analysis
+PSm6A.analysis <- function(counts,phenotype,metadata,Z){
+  # Split count matrices by cross and parent of origin for plotting
+  p1.pat <- counts[,metadata[metadata$parent%in%c("D")&
+                               metadata$lineage=="B"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  p1.mat <- counts[,metadata[metadata$parent%in%c("Q")&
+                               metadata$lineage=="B"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  p2.pat <- counts[,metadata[metadata$parent%in%c("D")&
+                               metadata$lineage=="A"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  p2.mat <- counts[,metadata[metadata$parent%in%c("Q")&
+                               metadata$lineage=="A"&
+                               metadata$phenotype==phenotype,"sample.id"]]
+  # Set up a data.frame to plot %p1 and %p2 for each SNP
+  p1.plot <- data.frame(rowSums(p1.pat)/(rowSums(p1.mat)+rowSums(p1.pat)))
+  names(p1.plot) <- c("p1")
+  p1.plot[is.nan(p1.plot$p1),"p1"] <- 0
+  p2.plot <- data.frame(rowSums(p2.mat)/(rowSums(p2.mat)+rowSums(p2.pat)))
+  names(p2.plot) <- c("p2")
+  p2.plot[is.nan(p2.plot$p2),"p2"] <- 0
+  plot <- cbind(p1.plot,p2.plot)
+  # Join results of Storer-Kim tests
+  plot <- plot[row.names(plot)%in%Z$SNP_gene,]
+  plot$Z.p <- Z$p
+  plot$SNP_gene <- row.names(plot)
+  plot$gene <- as.character(map(strsplit(plot$SNP_gene, split = ":"), 2))
+  # Correct for multiple testing
+  plot$Z.padj <- p.adjust(plot$Z.p,"BH")
+  plot$bias <- "NA"
+  # For each gene, check whether all SNPs are biased in the same direction
+  for(i in 1:length(row.names(plot))){
+    p <- plot[i,"Z.padj"]
+    p1 <- plot[i,"p1"]
+    p2 <- plot[i,"p2"]
+    if(p<0.05&p1>0.6&p2<0.4){plot[i,"bias"] <- "pat"}
+    if(p<0.05&p1<0.4&p2>0.6){plot[i,"bias"] <- "mat"}
+    if(p<0.05&p1<0.4&p2<0.4){plot[i,"bias"] <- "EHB"}
+    if(p<0.05&p1>0.6&p2>0.6){plot[i,"bias"] <- "AHB"}
+  }
+  biaslist <- data.frame(matrix(ncol=2,nrow=0))
+  names(biaslist) <- c("gene","bias")
+  genelist <- unique(plot$gene)
+  for(i in 1:length(genelist)){
+    tmp <- unique(plot[plot$gene==genelist[i],"bias"])
+    if(length(tmp)>1){
+      if(length(tmp)==2){
+        if(any(tmp%in%"NA")){
+          bias <- tmp[!tmp%in%"NA"]
+        }
+      }else{
+        bias <- "NA"
+      }
+    }else{bias <- tmp}
+    biaslist <- rbind(biaslist,data.frame(gene=genelist[[i]], bias=bias))
+  }
+  plot <- plot %>% left_join(biaslist, by = c('gene' = 'gene')) 
+  names(plot)[c(7:8)] <- c("xbias","bias")
+  plot$bias.plot <- "NA"
+  for(i in 1:length(row.names(plot))){
+    p1 <- plot$p1[i]
+    p2 <- plot$p2[i]
+    bias <- plot$bias[i]
+    if(!bias=="NA"){
+      if(bias=="pat"){if(p1>0.6&p2<0.4){plot[i,"bias.plot"]<- "pat"}}
+      if(bias=="mat"){if(p1<0.4&p2>0.6){plot[i,"bias.plot"] <- "mat"}}
+      if(bias=="EHB"){if(p1<0.4&p2<0.4){plot[i,"bias.plot"] <- "EHB"}}
+      if(bias=="AHB"){if(p1>0.6&p2>0.6){plot[i,"bias.plot"] <- "AHB"}}
+    }
+  }
+  plot <- rbind(plot[plot$bias.plot%in%c("NA"),],
+                plot[plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+  plot$bias.plot <- factor(plot$bias.plot,
+                           levels = c("NA","mat", "AHB", "EHB", "pat"))
+  return(plot)
+}
+```
+
+```{r,eval=F}
+unresponsive.plot <- PSm6A.analysis(unresponsive_m6A,"unresponsive",metadata,
+                                    unresponsive.Z)
+write.csv(unresponsive.plot,"results/EHBxAHB_unresponsive_PSm6A.csv",row.names=F)
+
+responsive.plot <- PSm6A.analysis(responsive_m6A,"responsive",metadata,
+                                 responsive.Z)
+write.csv(responsive.plot,"results/EHBxAHB_responsive_PSm6A.csv",row.names=F)
+```
+
+## Plot data for each phenotype
+
+```{r, echo = F}
+unresponsive.plot <- read.csv("results/EHBxAHB_unresponsive_PSm6A.csv")
+unresponsive.plot[is.na(unresponsive.plot$xbias),"xbias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias),"bias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias.plot),"bias.plot"] <- "NA"
+unresponsive.plot <- rbind(unresponsive.plot[unresponsive.plot$bias.plot%in%c("NA"),],
+                      unresponsive.plot[unresponsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+unresponsive.plot$bias.plot <- factor(unresponsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+```
+
+```{r}
+g1 <- PSGE.plot(unresponsive.plot,"Non-aggressive workers")
+g1
+```
+
+```{r, echo = F}
+responsive.plot <- read.csv("results/EHBxAHB_responsive_PSm6A.csv")
+responsive.plot[is.na(responsive.plot$xbias),"xbias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias),"bias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias.plot),"bias.plot"] <- "NA"
+responsive.plot <- rbind(responsive.plot[responsive.plot$bias.plot%in%c("NA"),],
+                      responsive.plot[responsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+responsive.plot$bias.plot <- factor(responsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+```
+
+```{r}
+g2 <- PSGE.plot(responsive.plot,"Aggressive workers")
+g2
+```
+
+## Final plot
+
+### Make center grid
+
+```{r}
+triplot <- triplot.plot(unresponsive.plot,
+                        responsive.plot,
+                        "Non-aggressive",
+                        "Aggressive",
+                        allgenes)
+plot(triplot)
+```
+
+### Join plots to generate the final plot
+
+```{r, eval=F}
+fig2 <- arrangeGrob(g1, triplot, g2, widths=c(5,2.5,5))
+ggsave(file="results/AHBxEHB_m6A.png", plot=fig2, width=15, height=6)
+```
+
+```{r, echo=F, out.width="linewidth",fig.align="center"}
+knitr::include_graphics("results/AHBxEHB_m6A.png")
+```
+
+------------------------------------------------------------------------
+
+# Compare PSGE to PSm6A, and DElincRNAs & isoform switching
+
+```{r}
+un.PSGE <- read.csv("results/EHBxAHB_unresponsive_PSGE.csv")
+un.PSGE[is.na(un.PSGE$xbias),"xbias"] <- "NA"
+un.PSGE[is.na(un.PSGE$bias),"bias"] <- "NA"
+un.PSGE[is.na(un.PSGE$bias.plot),"bias.plot"] <- "NA"
+un.PSGE <- rbind(un.PSGE[un.PSGE$bias.plot%in%c("NA"),],
+                      un.PSGE[un.PSGE$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+un.PSGE$bias.plot <- factor(un.PSGE$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+res.PSGE <- read.csv("results/EHBxAHB_responsive_PSGE.csv")
+res.PSGE[is.na(res.PSGE$xbias),"xbias"] <- "NA"
+res.PSGE[is.na(res.PSGE$bias),"bias"] <- "NA"
+res.PSGE[is.na(res.PSGE$bias.plot),"bias.plot"] <- "NA"
+res.PSGE <- rbind(res.PSGE[res.PSGE$bias.plot%in%c("NA"),],
+                      res.PSGE[res.PSGE$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+res.PSGE$bias.plot <- factor(res.PSGE$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+un.m6A <- read.csv("results/EHBxAHB_unresponsive_PSm6A.csv")
+un.m6A[is.na(un.m6A$xbias),"xbias"] <- "NA"
+un.m6A[is.na(un.m6A$bias),"bias"] <- "NA"
+un.m6A[is.na(un.m6A$bias.plot),"bias.plot"] <- "NA"
+un.m6A <- rbind(un.m6A[un.m6A$bias.plot%in%c("NA"),],
+                      un.m6A[un.m6A$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+un.m6A$bias.plot <- factor(un.m6A$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+res.m6A <- read.csv("results/EHBxAHB_responsive_PSm6A.csv")
+res.m6A[is.na(res.m6A$xbias),"xbias"] <- "NA"
+res.m6A[is.na(res.m6A$bias),"bias"] <- "NA"
+res.m6A[is.na(res.m6A$bias.plot),"bias.plot"] <- "NA"
+res.m6A <- rbind(res.m6A[res.m6A$bias.plot%in%c("NA"),],
+                      res.m6A[res.m6A$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+res.m6A$bias.plot <- factor(res.m6A$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+un.matBias <- unique(un.PSGE[un.PSGE$bias.plot=="mat","gene"])
+res.matBias <- unique(res.PSGE[res.PSGE$bias.plot=="mat","gene"])
+un.patBias <- unique(un.PSGE[un.PSGE$bias.plot=="pat","gene"])
+res.patBias <- unique(res.PSGE[res.PSGE$bias.plot=="pat","gene"])
+
+un.m6A.matBias <- unique(un.m6A[un.m6A$bias.plot=="mat","gene"])
+res.m6A.matBias <- unique(res.m6A[res.m6A$bias.plot=="mat","gene"])
+un.m6A.patBias <- unique(un.m6A[un.m6A$bias.plot=="pat","gene"])
+res.m6A.patBias <- unique(res.m6A[res.m6A$bias.plot=="pat","gene"])
+
+un.PSGE.list <- c(un.matBias,un.patBias)
+un.m6A.list <- c(un.m6A.matBias,un.m6A.patBias)
+un.overlap.list <- intersect(un.PSGE.list,un.m6A.list)
+un.overlap.list
+
+res.PSGE.list <- c(res.matBias,res.patBias)
+res.m6A.list <- c(res.m6A.matBias,res.m6A.patBias)
+res.overlap.list <- intersect(res.PSGE.list,res.m6A.list)
+res.overlap.list
+
+SNP_pos <- read.csv("results/SNP_gene_tx_IDs.csv",row.names=1)
+DElincRNAs <- read.csv("results/DElincRNAs.csv",header=F)[,1]
+CK <- unique(SNP_pos[SNP_pos$Transcript%in%DElincRNAs,"Gene"])
+unique(as.character(map(strsplit(CK, split = ":"), 2)))
+
+sigSwitches <- read.table("results/sig_switches_by_phenotype.txt",header=1)
+sigSwitches$geneID <- as.character(sigSwitches$geneID)
+
+un.overlap.list <- intersect(unique(as.character(map(strsplit(un.PSGE.list, split = "[.]"), 1))), sigSwitches)
+un.overlap.list
+un.overlap.list <- intersect(unique(as.character(map(strsplit(un.m6A.list, split = "[.]"), 1))), sigSwitches)
+un.overlap.list
+
+res.overlap.list <- intersect(unique(as.character(map(strsplit(res.PSGE.list, split = "[.]"), 1))), sigSwitches)
+res.overlap.list
+res.overlap.list <- intersect(unique(as.character(map(strsplit(res.m6A.list, split = "[.]"), 1))), sigSwitches)
+res.overlap.list
+```
+
+------------------------------------------------------------------------
+
+# Session info
+
+```{r}
+sessionInfo()
+```

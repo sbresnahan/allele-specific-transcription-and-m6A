@@ -1,0 +1,626 @@
+---
+title: 'Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees: identification and differential expression of lincRNAs'
+author: 
+  - Lindsay Clark, HPCBio, Roy J. Carver Biotechnology Center, University of Illinois, Urbana-Champaign
+  - Modified for publication by Sean Bresnahan, Huck Institutes of the Life Sciences, Pennsylvania State University
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = FALSE, cache = TRUE)
+```
+
+```{r libs, message = FALSE, warning = FALSE}
+library(GenomicRanges)
+library(Biostrings)
+#library(ORFhunteR)
+library(ggplot2)
+library(Rsamtools)
+library(kableExtra)
+library(dplyr)
+library(tidyr)
+library(limma)
+library(edgeR)
+library(Glimma)
+library(seriation)
+library(viridis)
+library(RColorBrewer)
+```
+
+```{r find_lincRNA, eval = FALSE}
+# Load genome annotation ####
+gene_info <- readRDS("annotations.rds")
+
+# Transcript info from Flair ####
+gtf <- rtracklayer::import("../flair/2022-06-14/All_samples_collapse.isoforms.gtf")
+
+# correct gene and txpt names
+ncrows <- which(endsWith(gtf$transcript_id, "_NC")) # 25412 rows
+gtf$gene_id[ncrows] <- paste0("NC_", gtf$gene_id[ncrows])
+gtf$transcript_id[ncrows] <- sub("_NC$", "", gtf$transcript_id[ncrows])
+
+nwrows <- which(endsWith(gtf$transcript_id, "_NW")) # 234 rows
+gtf$gene_id[nwrows] <- paste0("NW_", gtf$gene_id[nwrows])
+gtf$transcript_id[nwrows] <- sub("_NW$", "", gtf$transcript_id[nwrows])
+
+# Start table of transcripts and gather info ####
+gtf2 <- gtf[gtf$type == "transcript"]
+
+txpts <- data.frame(Transcript = gtf2$transcript_id,
+                    Gene = gtf2$gene_id,
+                    Mitochondrial = seqnames(gtf2) == "NC_001566.1" | gtf2$gene_id == "NC_037641.1:1186000")
+
+annotated_lncRNAs <- unique(gene_info$transcript_id[gene_info$type == "lnc_RNA"])
+
+txpts$Annotated_lncRNA <- sub("-[[:digit:]]$", "", txpts$Transcript) %in% annotated_lncRNAs
+
+protein_coding_genes <- gene_info[which(gene_info$type == "gene" &
+                                    gene_info$gene_biotype == "protein_coding")] # 9935
+
+other_rna_genes <- gene_info[which(gene_info$type == "gene" &
+                                     gene_info$gene_biotype %in% c("guide_RNA", "miRNA", "rRNA",
+                                                                   "snoRNA", "snRNA", "tRNA"))] # 530
+
+txpts$Other_RNA <- txpts$Gene %in% other_rna_genes$gene_id
+
+txpts$Protein_coding <- txpts$Gene %in% protein_coding_genes$gene_id
+
+gene_overlaps <- countOverlaps(gtf2, c(protein_coding_genes, other_rna_genes),
+                              type = "any", ignore.strand = TRUE)
+
+txpts$Intergenic <- gene_overlaps == 0
+
+# Get transcript length from FASTA ####
+myfasta <- readDNAStringSet("../flair/2022-06-14/All_samples_collapse.isoforms.fa")
+
+txpts$Length <- width(myfasta)[match(paste(txpts$Transcript, txpts$Gene, sep = "_"), names(myfasta))]
+
+linc_so_far <- !txpts$Mitochondrial & txpts$Intergenic & txpts$Length >= 200
+
+# Predict ORF lengths
+linc_so_far_names <- paste(txpts$Transcript[linc_so_far], txpts$Gene[linc_so_far], sep = "_")
+orfpos <- lapply(as.character(myfasta[linc_so_far_names]), findORFs)
+orf_length <- sapply(orfpos, function(x) max(as.integer(x[,"length"])))
+orf_length[is.infinite(orf_length)] <- 0L
+txpts$ORF_length[linc_so_far] <- orf_length
+
+# Export transcripts to analyze with other tools ####
+# I'm not going to filter based on ORF length right now, since the coding potential
+# calculator should do a much better job of determining if a transcript is coding.
+
+myfasta_sub1 <- myfasta[linc_so_far_names]
+names(myfasta_sub1) <- txpts$Transcript[linc_so_far]
+
+writeXStringSet(myfasta_sub1,
+                file = "../lincRNAs/putative_lincRNA_2022-07-01.fasta")
+
+# write in smaller chunks
+for(i in seq_len(ceiling(sum(linc_so_far) / 500))){
+  i1 <- 500 * (i - 1) + 1
+  i2 <- min(c(500 * i, sum(linc_so_far)))
+  writeXStringSet(myfasta_sub1[i1:i2],
+                  file = paste0("../lincRNAs/putative_lincRNA_2022-07-01_subset", i, ".fasta"))
+}
+
+# External tools ####
+# CPAT at http://lilab.research.bcm.edu/
+# Select Fly (dm3, BDGP Release 5)
+# Import CPAT results
+txpts$CPC2.prob <- rep(NA_real_, nrow(txpts))
+txpts$CPC2.label <- rep(NA_character_, nrow(txpts))
+cpc2tab <- read.table("../lincRNAs/result_cpc2_all.txt", sep = "\t", header = FALSE)
+theserows <- match(cpc2tab[[1]], txpts$Transcript)
+txpts$CPC2.prob[theserows] <- cpc2tab[[6]]
+txpts$CPC2.label[theserows] <- cpc2tab[[7]]
+
+# BLASTX to UniProt + Swiss-Prot; see script blast_uniprot_sprot_2022-07-01.sh
+blastres <- read.csv("../lincRNAs/blast_uniprot_sprot_2022-07-01.csv",
+                     header = FALSE)
+colnames(blastres) <- c("qseqid", "qacc", "sseqid", "sacc", "qstart",
+                        "qend", "sstart", "send", "evalue", "length", "pident")
+
+txpts$Min_UPSP_evalue <- rep(NA_real_, nrow(txpts))
+for(tr in unique(blastres$qseqid)){
+  txpts$Min_UPSP_evalue[match(tr, txpts$Transcript)] <-
+    min(blastres$evalue[blastres$qseqid == tr])
+}
+
+# BLAST against other RNAs ####
+# Extract the ncRNA sequences at the gene level
+ncRNA_seqs <- Rsamtools::scanFa("../data/reference/GCF_003254395.2_Amel_HAv3.1+virus_genomic.fna",
+                     param = other_rna_genes)
+names(ncRNA_seqs) <- other_rna_genes$Name
+
+# writeXStringSet(ncRNA_seqs,
+#                 file = "../../data/reference/GCF_003254395.2_Amel_HAv3.1_shortnoncoding_genes.fna")
+
+# 7SL/SRP?
+# Get Drosophila versions from https://www.ncbi.nlm.nih.gov/nuccore/NR_001992.2?report=fasta
+# and https://www.ncbi.nlm.nih.gov/nuccore/NR_037753.2?report=fasta
+# put in file data/references/Drosophila_7SL_RNA.fa
+
+# From the terminal:
+# cd data/reference
+# cat GCF_003254395.2_Amel_HAv3.1_shortnoncoding_genes.fna Drosophila_7SL_RNA.fa > noncoding_to_blast_2022-01-27.fa
+
+# see script blast_ncRNA_2022-07-06.sh
+
+# Read in BLAST output
+blastres2 <- read.csv("../results/lincRNAs/blast_ncRNA_2022-07-06.csv",
+                     header = FALSE)
+colnames(blastres2) <- c("qseqid", "qacc", "sseqid", "sacc", "qstart",
+                        "qend", "sstart", "send", "evalue", "length", "pident")
+
+txpts$Min_ncRNA_evalue <- rep(NA_real_, nrow(txpts))
+for(tr in unique(blastres2$qseqid)){
+  txpts$Min_ncRNA_evalue[match(tr, txpts$Transcript)] <-
+    min(blastres2$evalue[blastres2$qseqid == tr])
+}
+
+#saveRDS(txpts, file = "lincRNA_search_2022-07-06.rds")
+```
+
+```{r loadtxpts}
+readidpat <- "^[[:xdigit:]]{8}-([[:xdigit:]]{4}-){3}[[:xdigit:]]{12}(-[[:digit:]])?"
+txptpat <- "^[NX][MR]_[[:digit:]]+\\.[[:digit:]]+(-[[:digit:]])?"
+pseudogene_pat <- "^gene[[:digit:]]+(-[[:digit:]])?"
+
+unknowngene_pat <- "N[CW]_[[:digit:]]+\\.[[:digit:]]+:[[:digit:]]+$"
+knowngene_pat <- "GeneID:[[:digit:]]+$"
+viralgene_pat <- "(DW|ABP|IAP|SB|CBP|VD)V(:[[:digit::]+)?$"
+rRNA_pat <- "l-rRNA$"
+
+txpts <- readRDS("lincRNA_search_2022-07-06.rds")
+linc_so_far <- !txpts$Mitochondrial & txpts$Intergenic & txpts$Length >= 200
+linc_final <- !(!linc_so_far | (!is.na(txpts$CPC2.label) & txpts$CPC2.label == "coding") |
+                  (!is.na(txpts$Min_UPSP_evalue) & txpts$Min_UPSP_evalue < 1e-3) |
+                  (!is.na(txpts$Min_ncRNA_evalue) & txpts$Min_ncRNA_evalue < 1e-3) |
+                  grepl(viralgene_pat, txpts$Gene))
+```
+
+```{r dge}
+# Import read counts for these transcripts ####
+mycounts <- read.table("counts_matrix_AvsB_2022-07-06.tsv",
+                       sep = "\t", header = TRUE)
+colnames(mycounts)[-1] <- sub("_.*$", "", colnames(mycounts)[-1])
+
+# to match transcript info to flair count matrix
+txpts$FlairName <- paste(txpts$Transcript, txpts$Gene, sep = "_")
+
+# Total sample read depth
+samDepth <- colSums(mycounts[,-1])
+
+# Mitochondrial depth
+mitoDepth <- colSums(mycounts[mycounts$id %in% txpts$FlairName[txpts$Mitochondrial],-1])
+
+# Nuclear depth
+nucDepth <- colSums(mycounts[mycounts$id %in%
+                               txpts$FlairName[!txpts$Mitochondrial &
+                                                 !grepl(viralgene_pat, txpts$Gene)],-1])
+
+# subset to lincRNAs
+mycounts <- mycounts[mycounts$id %in% txpts$FlairName[linc_final],] # 3640 transcripts
+
+# Depth just for lincRNAs
+lincRNAdepth <- colSums(mycounts[,-1])
+
+# Set up sample metadata table
+targets <- data.frame(Sample = colnames(mycounts)[-1])
+targets$Cross <- substring(targets$Sample, 8, 8)
+targets$Aggression <- substring(targets$Sample, 10, 10)
+targets$Group <- paste0(targets$Cross, targets$Aggression)
+targets$Label <- factor(targets$Sample,
+                        levels = targets$Sample[order(targets$Cross, targets$Aggression)])
+targets$Total_depth <- samDepth
+targets$Mitochondrial_depth <- mitoDepth
+targets$Nuclear_depth <- nucDepth
+targets$lincRNA_depth <- lincRNAdepth
+
+# Proportion lincRNA related to aggression?
+#summary(lm(lincRNA_depth / Nuclear_depth ~ Aggression, data = targets)) # P = 0.078
+
+# DGEList ####
+countsmat <- as.matrix(mycounts[,-1])
+rownames(countsmat) <- mycounts$id
+d <- DGEList(countsmat, samples = targets)
+temp <- match(mycounts$ids, txpts$FlairName)
+d$genes <- data.frame(row.names = mycounts$ids,
+                      txpts[temp,c("Transcript", "Gene")])
+
+# Normalization ####
+d <- calcNormFactors(d, method = "TMM")
+targets$TMM_prefilt <- d$samples$norm.factors
+logCPM <- cpm(d, log=TRUE)
+
+# Filtering ####
+min_cpm <- 250
+min_samp <- 3
+i.filter <- rowSums(logCPM > log2(min_cpm)) >= min_samp
+d.filt <- d[i.filter, , keep.lib.sizes=F]
+d.filt <- calcNormFactors(d.filt)
+logCPM.filt <- cpm(d.filt, log = T, prior.count =2)
+
+mymds.filt <- plotMDS(logCPM.filt, top = 5000, labels = d$samples$Label, plot = FALSE)
+
+# Differential gene expression ####
+model0 <- model.matrix(~ 0 + Group,
+                       data = d.filt$samples)
+colnames(model0) <- sub("Group", "", colnames(model0))
+
+contrasts0 <- makeContrasts(BT - BC,
+                            AT - AC,
+                            BC - AC,
+                            BT - AT,
+                            (BT + AT) - (BC + AC),
+                            (BT + BC) - (AT + AC),
+                            (BT - BC) - (AT - AC),
+                            levels = model0)
+
+#put normalized values in EList object type
+e <- new("EList", list(E =logCPM.filt,
+                       genes=d.filt$genes, targets=d.filt$samples))
+
+# fit model
+fit0 <- lmFit(e, design = model0)
+
+fit2 <- contrasts.fit(fit0, contrasts = contrasts0) %>% eBayes(trend = TRUE)
+
+# Heatmap for DGE ####
+colorkey <- brewer.pal(4, "Paired")
+names(colorkey) <- unique(targets$Group)
+
+siggenes <- rownames(topTable(fit2, number = Inf, p.value = 0.05)) # 41 genes
+
+heatdata <- logCPM.filt[siggenes,] %>% t() %>% scale() %>% t()
+colnames(heatdata) <- d.filt$samples$Label
+```
+
+```{r export, eval = FALSE}
+# Export raw counts and metadata
+temp <- match(mycounts$ids, txpts$FlairName)
+out <- data.frame(ID = mycounts$ids,
+                  Transcript = txpts$Transcript[temp],
+                  Gene = txpts$Gene[temp],
+                  Length = txpts$Length[temp])
+identical(temp, match(out$Transcript, gtf2$transcript_id)) # TRUE
+out$Chromosome <- as.character(seqnames(gtf2[temp]))
+out$Start <- start(gtf2[temp])
+out$End <- end(gtf2[temp])
+out$Strand <- as.character(strand(gtf2[temp]))
+out$Exons <-
+  sapply(out$Transcript,
+         function(x){
+           ex <- gtf[gtf$type == "exon" & gtf$transcript_id == x]
+           ex_pos <- paste(start(ex), end(ex), sep = "-")
+           paste(ex_pos, collapse = ";")
+         })
+out$Annotated_lncRNA <- txpts$Annotated_lncRNA[temp]
+out$Annotated_pseudogene <- grepl(pseudogene_pat, out$Transcript)
+out <- cbind(out, mycounts[,-1])
+
+# write.table(out, sep = "\t", row.names = FALSE,
+#             file = "../lincRNA_results/raw_counts_txpt_info_2022-07-06.txt")
+
+# writeXStringSet(myfasta[out$ID],
+#                 file = "../lincRNA_results/lincRNA_sequence_2022-07-06.fa")
+
+
+# export DGE results
+res.dge <- data.frame(ID = row.names(d.filt$genes),
+                      d.filt$genes,
+                      AveExpr = fit2$Amean)
+
+for(coef in colnames(contrasts0)){
+  temp <- topTable(fit2, coef = coef, number = Inf)
+  colnames(temp) <- paste(colnames(temp), coef)
+  res.dge <- cbind(res.dge, temp[res.dge$ID, c(3, 6, 7)])
+}
+
+temp <- topTable(fit2, number = Inf) # F-statistics
+colnames(temp) <- paste(colnames(temp), "ANOVA")
+res.dge <- cbind(res.dge, temp[res.dge$ID, c("P.Value ANOVA", "adj.P.Val ANOVA")])
+
+res.dge$In_heatmap <- res.dge[["adj.P.Val ANOVA"]] < 0.05
+
+# write.table(res.dge, file = "../lincRNA_results/differential_lincRNA_expression_results_2022-07-06.txt",
+#             sep = "\t", row.names = FALSE)
+
+# export logCPM values
+# write.table(cbind(ID = rownames(d.filt$genes), d.filt$genes, logCPM.filt),
+#            sep = "\t", row.names = FALSE,
+#            file = "../lincRNA_results/filtered_logCPM_lincRNA_2022-07-07.txt")
+
+# Glimma MA
+for(coef in colnames(contrasts0)){
+  glimmaMA(fit2, d.filt,
+           logCPM.filt,
+           groups = d.filt$samples$Group,
+           coef = coef, main = coef,
+           transform.counts = "none",
+           html = paste0("../stats/glimma/glimma_MA_lncRNA_", coef, "_2022-07-06.html"))
+}
+```
+
+## Results files
+
+The "results/lincRNA_results" folder contains results from this analysis:  
+
+* `raw_counts_txpt_info_2022-07-06.xlsx` contains genomic coordinates of each
+  lincRNA transcript, as well as raw read counts in each sample.  
+* `lincRNA_sequence_2022-07-06.fa` contains the sequence of each transcript.  
+* `filtered_logCPM_lincRNA_2022-07-07.xlsx` contains logCPM (log-2
+  counts-per-million) values for transcripts after filtering. 
+* `differential_lincRNA_expression_results_2022-07-06.xlsx` contains results
+  of differential expression analysis.  
+
+Additionally, all scripts and code for the full analysis are available at
+https://github.com/sbresnahan/allele-specific-transcription-and-m6A.
+  
+## Study design
+
+This study seeks to use transcriptome data to understand behavioral differences
+between non-aggressive and aggressive honey bees.  Two crosses were made.
+Cross A had AHB as the female parent (SRR14654188) and EHB as the male parent
+(SRR14654189).  Cross B had EHB as the female parent (SRR14654186) and AHB as
+the male parent (SRR14654187).  Three or more aggressive bees and three or more
+non-aggressive bees (labeled C and T) were collected from each cross. Twelve
+head and abdomen samples, spanning multiple batches over the course of a year,
+were ultimately analyzed, with three samples per experimental group.
+RNA samples were sequenced with Oxford Nanopore Technology direct RNA sequencing on a FLO-MIN106 flowcell.
+
+In this report I describe the detection of lincRNAs and their differential
+expression.  
+
+## Sample processing
+
+FAST5 files from all samples were processed with Guppy 5.0.16 using the
+`rna_r9.4.1_70bps_hac.cfg` configuration (Oxford Nanopore Technologies)
+for base calling on a GPU.  FASTQ files labeled "pass" were concatenated
+together to generate one FASTQ per sample.
+[Minimap 2.21](https://github.com/lh3/minimap2)[^minimap2] was used for
+alignment to the
+[_Apis mellifera_ HAv3.1 reference genome](https://www.ncbi.nlm.nih.gov/genome/48?genome_assembly_id=403979)
+(plus common viral genomes) in splice-aware mode with a kmer length of 14,
+using the published gene annotation to guide alignment.
+[SAMtools 1.12](https://github.com/samtools/samtools)[^samtools] was used to
+sort and index the resulting BAM files.
+[Flair 1.5](https://github.com/BrooksLabUCSC/flair)[^flair] was then used to
+convert BAM files to BED format and correct intron-exon junctions based on
+the published annotation, then call isoforms across all samples.  These
+isoforms included published transcripts and genes as well as novel transcripts
+and genes.
+
+The `flair quantify` command was then used to quantify abundance of each
+transcript in each sample.  
+
+## Identification of long intergenic non-coding RNAs (lincRNAs)
+
+Of the `r prettyNum(nrow(txpts), big.mark = ",")` transcripts output by Flair[^flair],
+`r sum(txpts$Annotated_lncRNA)` were already annotated as long non-coding RNAs
+(lncRNAs) in the NCBI GCF_003254395.2_Amel_HAv3.1 annotation, while
+`r prettyNum(sum(txpts$Other_RNA), big.mark = ",")` were for genes annotated as
+ribosomal RNA (rRNA) or small nuclear RNA (snRNA), and
+`r prettyNum(sum(txpts$Protein_coding), big.mark = ",")` were for protein-coding
+genes.  Although snoRNAs, miRNAs, tRNAs, and guide RNAs were annotated in the
+reference genome, Flair did not output transcripts for any of these.
+
+Transcripts were defined as "intergenic" if they had no overlap with any
+annotated protein-coding, rRNA, miRNA, snRNA, snoRNA, tRNA, or guide RNA gene;
+`r prettyNum(sum(txpts$Intergenic), big.mark = ",")` transcripts were
+considered intergenic by this measure.  Additionally,
+`r prettyNum(sum(txpts$Mitochondrial), big.mark = ",")` transcripts were on
+the mitochondrial genome (including transcripts matching gene NC_037641.1:1186000).
+Transcripts were retained for further analysis if
+they were non-mitochondrial, intergenic, and were at least 200 nucleotides in
+length, leaving `r sum(linc_so_far)` transcripts for further analysis, including
+`r sum(grepl(viralgene_pat, txpts$Gene[linc_so_far]))` transcripts that were
+later removed for being viral in origin.
+
+The `findORFs` function in the ORFhunterR[^orfhunter] R package was used to
+identify putative open reading frames (ORFs) and their lengths.  However,
+`r sum(txpts$ORF_length[txpts$Annotated_lncRNA] > 100, na.rm = TRUE)` of the
+`r sum(linc_so_far & txpts$Annotated_lncRNA)` annotated lncRNAs that were
+analyzed had putative ORFs using this method, so this information was ignored
+in favor of other approaches for determining if transcripts were protein-coding.
+Using [CPC2](http://cpc2.gao-lab.org/batch.php)[^cpc2],
+`r sum(txpts$CPC2.label == "coding",  na.rm = TRUE)` out of
+`r sum(!is.na(txpts$CPC2.label))` transcripts were determined to have coding
+potential.  Additionally, BLASTX (from BLAST+ v2.10.1) was used to align
+transcripts to the Uniprot and Swiss-Prot combined database (from a June 2020
+mirror) under default parameters. Using a cutoff E value of 0.001,
+`r sum(txpts$Min_UPSP_evalue < 1e-3,  na.rm = TRUE)` transcripts aligned to
+a known protein sequence.  Lastly, gene sequences for all annotated snRNA,
+snoRNA, miRNA, tRNA, rRNA, and guide RNAs were extracted from the
+GCF_003254395.2_Amel_HAv3.1 reference sequence.  Since there were no annotated
+7SL RNA genes in the reference, I used sequences NR_001992.2 and NR_037753.2
+from _Drosophila melanogaster_ to represent those.  I then aligned the
+putative lincRNA transcripts to all of these other non-coding RNAs using
+discontiguous megablast (from BLAST+ v2.10.1) under default parameters,
+finding six transcripts aligning very strongly to rRNA genes.
+
+Altogether, `r sum(linc_final)` transcripts were retained as lincRNAs for being
+non-mitochondrial, non-viral, intergenic, at least 200 nt long, not predicted to
+have coding potential by CPC2, not aligning to known proteins, and not aligning
+to other non-coding RNAs.  This is an increase over the 3048 lincRNA transcripts
+identified prior to fixing the Flair bug. Tallies of annotated and novel lincRNAs
+and their corresponding genes are listed in Table 1.
+
+```{r table01}
+stopifnot(all(grepl(knowngene_pat, txpts$Gene[linc_final]) | grepl(unknowngene_pat, txpts$Gene[linc_final])))
+data.frame(Gene_type = c("Annotated", "Novel"),
+           Genes = c(length(unique(grep(knowngene_pat, txpts$Gene[linc_final], value = TRUE))),
+                       length(unique(grep(unknowngene_pat, txpts$Gene[linc_final], value = TRUE)))),
+           Annotated_lncRNAs = c(sum(txpts$Annotated_lncRNA[linc_final]), 0L),
+           Annotated_pseudogene_RNAs = c(sum(grepl(pseudogene_pat, txpts$Transcript[linc_final])), 0L),
+           Novel_RNAs = c(sum(grepl(readidpat, txpts$Transcript[linc_final]) &
+                                grepl(knowngene_pat, txpts$Gene[linc_final])),
+                          sum(grepl(readidpat, txpts$Transcript[linc_final]) &
+                                grepl(unknowngene_pat, txpts$Gene[linc_final])))) %>%
+  kable(caption = "Table 1. Tallies of annotated and unannotated lincRNAs after filtering.") %>%
+  kable_styling()
+```
+
+
+## QC on read counts
+
+Out of the `r sum(linc_final)` lincRNA transcripts identified, Flair output read
+counts for `r nrow(mycounts)` of them. The proportion of reads mapping to
+lincRNAs varied among samples, with T samples having slightly lower proportions
+than C samples (P = 0.055).  At a gross scale the total number of lincRNA reads
+followed the total library size (Fig. 2; see library sizes in previous reports).
+
+```{r fig01, fig.cap = "Fig. 1. Proportion of reads mapping to lincRNAs, out of total reads mapping to the nuclear genome. Reads mapping to mitochondrial or viral genomes were excluded.", fig.height = 5.5, fig.width = 7}
+targets %>%
+  mutate(Proportion_lincRNA = lincRNA_depth / Nuclear_depth) %>%
+  ggplot(aes(x = Label, y = Proportion_lincRNA, fill = Group)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_fill_brewer(palette = "Paired") +
+  ggtitle("Proportion nuclear reads mapping to lincRNA transcripts")
+```
+
+```{r fig02, fig.cap = "Fig. 2. Total number of reads mapping to lincRNAs in each sample.", fig.height = 5.5, fig.width = 7}
+ggplot(targets, aes(x = Label, y = lincRNA_depth, fill = Group)) +
+  geom_col() +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_fill_brewer(palette = "Paired") +
+  ggtitle("Total lincRNA depth per sample")
+```
+
+## Normalization and filtering
+
+When comparing expression levels, the numbers of reads per transcript need to be normalized not only because of the differences in total number of reads, but because there could be differences in RNA composition such that the total number of reads would not be expected to be the same. The TMM (trimmed mean of M values) normalization[^tmm] in the [edgeR](https://bioconductor.org/packages/release/bioc/html/edgeR.html) package[^edger2] uses the assumption of *most genes do not change* to calculate a normalization factor for each sample to adjust for such biases in RNA composition. In this dataset, TMM normalization factors fluctuated between `r round(min(d$samples$norm.factors),2)` and `r round(max(d$samples$norm.factors),2)`. TMM normalization factors are multiplied by the library size in order to generate the effective library size, where smaller TMM normalization factors indicate more overrepresented genes in the sample. Normalization factors varied among samples but were not particularly associated with experimental group (Fig. 3).
+
+```{r fig03, fig.cap = "Fig. 3. Normalization factors before filtering"}
+ggplot(targets, aes(x = Label, y = TMM_prefilt, fill = Group)) +
+  geom_col() +
+  geom_hline(yintercept = 1, linetype = 2) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5)) +
+  scale_fill_brewer(palette = "Paired") +
+  ggtitle("TMM factors before filtering")
+```
+
+While the sequence analysis identified a total of `r scales::comma(nrow(d))` lincRNA transcripts, many of these might not have detectable expression in enough samples for differential expression to be detectable. Therefore, we set the detection threshold at `r min_cpm` cpm (counts per million) in at least `r min_samp` samples, which resulted in `r scales::comma(sum(!i.filter))` lincRNAs being filtered out, leaving `r scales::comma(sum(i.filter))` lincRNAs to be analyzed for differential expression, containing `r scales::percent(sum(d.filt$counts) / sum(d$counts), 0.01)` of the reads. This threshold resulted in a fairly even number of genes being detected across samples, considering the variability in library size (Fig. 4).  In a typical Illumina RNA-seq experiment, we might use 1 cpm as the filtering threshold.  Given the lower read depth of this experiment due to the use of Oxford Nanopore sequencing and filtering down to lincRNAs, a higher threshold was needed to differentiate between lincRNAs that could be detected in few samples vs. lincRNAs that could be detected in most samples.  I arrived at a threshold of `r min_cpm` by examining the detection rates at a variety of thresholds ranging from 200 to 500, where 164 CPM corresponded to zero reads in the raw data (results not shown).
+
+After filtering, TMM normalization was performed again and normalized log2-based count per million values (logCPM) were calculated using edgeR's[^edger1] `cpm()` function with `prior.count = 2` to help stabilize fold-changes of extremely low expression genes.  TMM normalization factors after filtering are shown in Fig. 5, and compared to pre-filtering values in Fig. 6.
+
+```{r fig04, fig.cap = "Fig. 4. Number of detected genes passing the filtering threshold in each sample."}
+ggplot(mapping = aes(x = d$samples$Label, y = colSums(logCPM > log2(min_cpm)),
+                     fill = d$samples$Group)) +
+  geom_col() +
+  labs(x = "Sample", y = "Number of genes", fill = "Group",
+       title = paste0("Number of genes with >", min_cpm, " counts per million")) +
+  scale_fill_manual(values = colorkey) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+```{r fig05, fig.cap = "Fig. 5. TMM normalization factors post-filtering."}
+ggplot(mapping = aes(x = d.filt$samples$Label, y = d.filt$samples$norm.factors,
+                     fill = d.filt$samples$Group)) +
+  geom_col() + 
+  geom_hline(yintercept = 1, lty = 2) +
+  labs(x = "Sample", y = "Normalization factor", fill = "Group",
+       title = "TMM normalization factors post-filtering") +
+  scale_fill_manual(values = colorkey) +
+  theme(axis.text.x = element_text(angle = 90, hjust = 1, vjust = 0.5))
+```
+
+```{r fig06, fig.cap = "Fig. 6. Comparison of TMM normalization factors before and after filtering."}
+ggplot(mapping = aes(x = d$samples$norm.factors, y = d.filt$samples$norm.factors,
+                     fill = d$samples$Group)) +
+  geom_abline(slope = 1, intercept = 0) +
+  geom_label(aes(label = d$samples$Label)) +
+  labs(x = "TMM norm factors before filtering",
+       y = "TMM norm factors after filtering",
+       fill = "Group") +
+  scale_fill_manual(values = colorkey)
+```
+
+## Sample clustering
+
+Multidimensional scaling in the [limma](https://bioconductor.org/packages/release/bioc/html/limma.html)[^limma] package was used to assess the largest effects on gene composition among samples. The normalized logCPM values from all `r sum(i.filter)` lincRNAs between each pair of samples were chosen to construct the multidimensional scaling plot.  The first axis separated the two crosses, while the second axis separated C and T samples (Fig. 7).  
+```{r fig07, fig.cap = "Fig. 7. Multidimensional scaling of samples after filtering, using the top 5000 variable genes between each pair of samples.", fig.width = 7, fig.height = 5}
+ggplot(mapping = aes(x = mymds.filt$x, y = mymds.filt$y,
+                     fill = d.filt$samples$Group)) +
+  geom_label(aes(label = d.filt$samples$Label)) +
+  labs(fill = "Group",
+       x = paste0("Dim 1 (", round(mymds.filt$var.exp[1] * 100, 1),"%)"),
+       y = paste0("Dim 2 (", round(mymds.filt$var.exp[2] * 100, 1),"%)"),
+       title = "MDS after filtering") +
+  scale_fill_manual(values = colorkey)
+```
+
+## Differential gene expression
+
+Differential gene expression (DE) analysis was performed using the limma-trend method[^trend1].
+Multiple testing correction was done using the False Discovery Rate method[^fdr].
+The model run was:
+
+$Y = Group$
+
+where $Group$ refers to the AC, AT, BC, and BT groups.
+The following contrasts were then assessed:
+
+* **BT - BC**: Differences between T and C bees from the B cross
+* **AT - AC**: Differences between T and C bees from the A cross
+* **BC - AC**: Differences between B and A crosses, with C as the baseline
+* **BT - AT**: Differences between B and A crosses in T samples
+* **(BT + AT) - (BC + AC)**: Differences between T and C bees across both crosses
+* **(BT + BC) - (AT + AC)**: Differences between crosses, looking at both C and T
+* **(BT - BC) - (AT - AC)**: Interaction effect; differential effect of cross on differences between T and C bees
+
+Numbers of significantly up- and down-regulated genes are shown in Table 2.
+
+```{r table02}
+temp <- summary(decideTests(fit2))
+kable(temp,
+      caption = "Table 2. Number of gene significant for differential expression at FDR < 0.05.") %>%
+  kable_styling() %>% row_spec(c(1,3), bold = TRUE)
+```
+
+Results for all genes are listed in the file "differential_lincRNA_expression_results_2022-07-06.xlsx".  
+
+## Heatmaps for differential lincRNA expression
+
+Across all of the experimental groups contrasts, a one-way ANOVA was run in
+limma, identifying `r length(siggenes)`
+significant lincRNAs.  These lincRNA were then plotted in a heatmap to summarize
+gross changes in lincRNA expression across groups.   (Fig. 8).
+
+```{r fig8, fig.cap = "Fig. 8. Heatmap of 29 lincRNAs with FDR < 0.05 in one-way anova for effect of experimental group.", fig.height = 9, fig.width = 7}
+hmap(heatdata, scale = "none", col = plasma(36),
+     ColSideColors = colorkey[d.filt$samples$Group],
+     main = "lincRNAs significant in ANOVA at FDR < 0.05",
+     margins = c(5, 15))
+```
+
+## References
+
+[^flair]: Tang, A.D., Soulette, C.M., van Baren, M.J. et al. Full-length transcript characterization of SF3B1 mutation in chronic lymphocytic leukemia reveals downregulation of retained introns. Nat Commun 11, 1438 (2020). https://doi.org/10.1038/s41467-020-15171-6
+
+[^cpc2]: Kang Y. J., Yang D. C., Kong L., Hou M., Meng Y. Q., Wei L., Gao G. 2017. CPC2: a fast and accurate coding potential calculator based on sequence intrinsic features. Nucleic Acids Research 45(Web Server issue): W12–W16.
+
+[^orfhunter]: Grinev V, Yatskou M, Skakun V, Chepeleva M, Nazarov P (2021). ORFhunteR: Predict open reading frames in nucleotide sequences. R package version 1.2.0. 
+
+[^tmm]: Robinson MD, Oshlack A (2010). A scaling normalization method for differential expression analysis of RNA-seq data. Genome Biology 11, R25.
+
+[^limma]: Ritchie, M.E., Phipson, B., Wu, D., Hu, Y., Law, C.W., Shi, W., and Smyth, G.K. (2015). limma powers differential expression analyses for RNA-sequencing and microarray studies. Nucleic Acids Research 43(7), e47.
+
+[^voom]: Law CW, Chen Y, Shi W, et al.: voom: Precision weights unlock linear model analysis tools for RNA-seq read counts. Genome Biol. 2014; 15(2): R29
+
+[^fdr]: Benjamini, Y., & Hochberg, Y. (1995). Controlling the false discovery rate: a practical and powerful approach to multiple testing. Journal of the Royal statistical society: series B (Methodological), 57(1), 289-300.
+
+[^trend1]: Chen Y, Lun ATL and Smyth GK. From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline [version 2; referees: 5 approved]. F1000Research 2016, 5:1438 (doi: 10.12688/f1000research.8987.2)
+
+[^edger1]: McCarthy DJ, Chen Y, Smyth GK (2012). "Differential expression analysis of multifactor RNA-Seq experiments with respect to biological variation." Nucleic Acids Research, 40(10), 4288-4297.
+
+[^edger2]: Robinson MD, McCarthy DJ, Smyth GK (2010). "edgeR: a Bioconductor package for differential expression analysis of digital gene expression data." Bioinformatics, 26(1), 139-140.
+
+[^edger3]: Chen Y, Lun ATL and Smyth GK. From reads to genes to pathways: differential expression analysis of RNA-Seq experiments using Rsubread and the edgeR quasi-likelihood pipeline [version 2; peer review: 5 approved]. F1000Research 2016, 5:1438 (https://doi.org/10.12688/f1000research.8987.2)
+
+[^minimap2]: Li, H. (2018). Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics, 34:3094-3100. doi:10.1093/bioinformatics/bty191
+
+[^samtools]: Petr Danecek, James K Bonfield, Jennifer Liddle, John Marshall, Valeriu Ohan, Martin O Pollard, Andrew Whitwham, Thomas Keane, Shane A McCarthy, Robert M Davies, Heng Li (2021). Twelve years of SAMtools and BCFtools. GigaScience, Volume 10, Issue 2, giab008, https://doi.org/10.1093/gigascience/giab008

@@ -1,0 +1,276 @@
+---
+title: "Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees: analysis of parent-of-origin allele-specific transcription and m6A, and their relationships to gene expression and isoform switching"
+author: "Sean Bresnahan"
+date: "`r Sys.Date()`"
+output:
+  html_document:
+    toc: yes
+---
+
+```{r,message=F, echo=F}
+library(tidyverse)
+library(plyr)
+library(Rfast)
+library(tryCatchLog)
+library(lmerTest)
+library(car)
+library(viridis)
+library(gridExtra)
+library(kableExtra)
+library(doParallel)
+library(doSNOW)
+```
+
+------------------------------------------------------------------------
+
+For an annotated markdown of the analysis code, see: [https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/PSm6A.html](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/PSm6A.html)
+
+## Prerequisite files
+
+The "src" directory contains files that are required for this analysis:
+
+* `metadata.csv` contains the sample metadata for each library
+* `Amel_HAv3.1_genes.bed` was created using the RefSeq gene annotation for Amel_HAv3.1 [GCF_003254395.2_Amel_HAv3.1_genomic.gff](https://ftp.ncbi.nlm.nih.gov/genomes/all/GCF/003/254/395/GCF_003254395.2_Amel_HAv3.1/GCF_003254395.2_Amel_HAv3.1_genomic.gff.gz) via [BEDOPS gff2bed](https://bedops.readthedocs.io/en/latest/content/reference/file-management/conversion/gff2bed.html)
+
+Additionally, the "results" directory contains files output by previous scripts that are required for this analysis: 
+
+* `coverage_matrix_2022-08-03.txt` contains the read counts at parent SNP positions and is output from `src/combine_results_2022-08-03.R`
+* `probM_matrix_2022-08-03.txt` contains the RNA m6A probability at parent SNPs and is output from `src/combine_results_2022-08-03.R`
+* `lincRNA_txpts.txt` contains the transcript IDs of lincRNAs identified by `src/lincRNAs_2022-07-01.R`
+* `DElincRNAs.csv` contains the gene IDs of differentially expressed lincRNAs identified by `src/lincRNAs_2022-07-01.R`
+* `sig_switches_by_phenotype.txt` contains the the gene IDs showing significant isoform switches identified by `src/isoformSwitchAnalyzeR_2022-07-07.R`
+
+## Results files
+
+The "results" folder contains results from this analysis: 
+
+* `EHBxAHB_PS_expression.csv` contains the read counts at parent SNPs within transcripts
+* `EHBxAHB_responsive_counts.csv` contains the read counts at parent SNPs within transcripts expressed in aggressive bees
+* `EHBxAHB_responsiveSK.csv` contains test results of Storer-Kim binomial exact tests at each parent SNP within transcripts expressed in aggressive bees
+* `EHBxAHB_responsiveGLIMMIX.csv` contains test results of GLIMMIX models fit for each transcript expressed in aggressive bees
+* `EHBxAHB_unresponsive_counts.csv` contains the read counts at parent SNPs within transcripts expressed in non-aggressive bees
+* `EHBxAHB_unresponsiveSK.csv` contains test results of Storer-Kim binomial exact tests at each parent SNP within transcripts expressed in non-aggressive bees
+* `EHBxAHB_unsponsiveGLIMMIX.csv` contains test results of GLIMMIX models fit for each transcript expressed in non-aggressive bees
+* `EHBxAHB_PS_m6A.csv` contains the RNA m6A probability at parent SNPs within transcripts
+* `EHBxAHB_responsive_PSm6A.csv` contains the RNA m6A probability at parent SNPs within transcripts expressed in aggressive bees
+* `EHBxAHB_responsiveZ.csv` contains test results of two-tailed unpooled Z-tests at each parent SNP within transcripts expressed in aggressive bees
+* `EHBxAHB_unresponsive_PSm6A.csv` contains the RNA m6A probability at parent SNPs within transcripts expressed in non-aggressive bees
+* `EHBxAHB_unresponsiveZ.csv` contains test results of two-tailed unpooled Z-tests at each parent SNP within transcripts expressed in non-aggressive bees
+
+Additionally, all scripts and code for the full analysis are available at
+https://github.com/sbresnahan/allele-specific-transcription-and-m6A.
+
+## Study design
+
+This study seeks to use transcriptome data to understand behavioral differences
+between non-aggressive and aggressive honey bees.  Two crosses were made.
+Cross A had AHB as the female parent (SRR14654188) and EHB as the male parent
+(SRR14654189).  Cross B had EHB as the female parent (SRR14654186) and AHB as
+the male parent (SRR14654187).  Three or more aggressive bees and three or more
+non-aggressive bees (labeled C and T) were collected from each cross. Twelve
+head and abdomen samples, spanning multiple batches over the course of a year,
+were ultimately analyzed, with three samples per experimental group.
+RNA samples were sequenced with Oxford Nanopore Technology direct RNA sequencing on a FLO-MIN106 flowcell.
+
+In this report I describe the detection of and relationship between allele-specific transcription and RNA m6A, as well as their relationship to gene expression and differential isoform usage.
+
+## Sample processing
+
+FAST5 files from all samples were processed with Guppy 5.0.16 using the
+`rna_r9.4.1_70bps_hac.cfg` configuration (Oxford Nanopore Technologies)
+for base calling on a GPU.  FASTQ files labeled "pass" were concatenated
+together to generate one FASTQ per sample.
+[Minimap 2.21](https://github.com/lh3/minimap2)[^minimap2] was used for
+alignment to the
+[_Apis mellifera_ HAv3.1 reference genome](https://www.ncbi.nlm.nih.gov/genome/48?genome_assembly_id=403979)
+(plus common viral genomes) in splice-aware mode with a kmer length of 14,
+using the published gene annotation to guide alignment.
+[SAMtools 1.12](https://github.com/samtools/samtools)[^samtools] was used to
+sort and index the resulting BAM files.
+[Flair 1.5](https://github.com/BrooksLabUCSC/flair)[^flair] was then used to
+convert BAM files to BED format and correct intron-exon junctions based on
+the published annotation, then call isoforms across all samples.  These
+isoforms included published transcripts and genes as well as novel transcripts
+and genes.
+
+Finally, [EpiNano](https://github.com/novoalab/EpiNano)[^epinano] was used to quantify read coverage and RNA m6A probability at parent SNPs within transcripts. combined with a custom R script (`src/combine_results_2022-08-03.R`) to subset the EpiNano output to the A sites at the center of RRACH motifs. Read coverage and m6A probability at each position within published and novel transcripts, separated by allele, were then combined to generate read count and m6A probability matrices.
+
+## Parent-of-origin allele-specific transcription
+
+Transcripts with $n < 2$ positions are filtered from the datasets. Storer-Kim binomial exact tests and generalized linear mixed effects models with interaction terms (GLIMMIX) are used to identify genes that exhibited parent-of-origin biased allelic expression following protocols for identifying significant variation in parent-of-origin gene expression described previously. [^kocher_2015] [^galbraith_2016] [^galbraith_2020]
+
+We identified a total of 31,078 unique transcripts in our samples, including 3,640 lincRNAs. Of these, 3,081 (9.91%) were shared between both crosses and sufficiently varied in their sequence composition between the parents of each cross, allowing for identification of parent-of-origin reads in the offspring. Specifically, we identified 35,782 SNP positions within transcripts that had at least 2 SNPs. Of the 3,081 transcripts, 2,584 were from the published annotation, and 497 were novel. After filtering SNP positions with low read counts in the offspring, our dataset contained read counts at 18,674 positions distributed among 1,928 transcripts in non-aggressive bees and 33,494 positions distributed among 2,820 transcripts in aggressive bees.
+
+We identified 307 transcripts that were consistently biased in both crosses, including 228 from previously annotated genes, 66 novel transcripts, and 13 lincRNAs. Some transcripts showed biased allelic expression in both non-aggressive and aggressive bees ($n = 11$), whereas others were only biased in one group (non-aggressive only, $n = 54$; aggressive only, $n = 242$). In support of our hypothesis, we found that paternally expressed genes were enriched in aggressive bees. Interestingly, maternally expressed genes were also enriched in aggressive bees, although there were fewer maternally expressed genes.  
+
+```{r, echo=F}
+metadata <- read.csv("../src/metadata.csv")
+SNP_counts <- read.csv("../results/EHBxAHB_PS_expression.csv",row.names=1)
+names(SNP_counts) <- gsub("[.]", "-", names(SNP_counts))
+SNP_m6A <- read.csv("../results/EHBxAHB_PS_m6A.csv",row.names=1)
+names(SNP_m6A) <- gsub("[.]", "-", names(SNP_m6A))
+unresponsive_counts <- read.csv("../results/EHBxAHB_unresponsive_counts.csv",row.names=1)
+names(unresponsive_counts) <- gsub("[.]", "-", names(unresponsive_counts))
+responsive_counts <- read.csv("../results/EHBxAHB_responsive_counts.csv",row.names=1)
+names(responsive_counts) <- gsub("[.]", "-", names(responsive_counts))
+unresponsive.SK <- read.csv("../results/EHBxAHB_unresponsiveSK.csv")
+responsive.SK <- read.csv("../results/EHBxAHB_responsiveSK.csv")
+unresponsive.GLIMMIX <- read.csv("../results/EHBxAHB_unresponsiveGLIMMIX.csv")
+responsive.GLIMMIX <- read.csv("../results/EHBxAHB_responsiveGLIMMIX.csv")
+
+unresponsive.plot <- read.csv("../results/EHBxAHB_unresponsive_PSGE.csv")
+unresponsive.plot[is.na(unresponsive.plot$xbias),"xbias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias),"bias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias.plot),"bias.plot"] <- "NA"
+unresponsive.plot <- rbind(unresponsive.plot[unresponsive.plot$bias.plot%in%c("NA"),],
+                      unresponsive.plot[unresponsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+unresponsive.plot$bias.plot <- factor(unresponsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+responsive.plot <- read.csv("../results/EHBxAHB_responsive_PSGE.csv")
+responsive.plot[is.na(responsive.plot$xbias),"xbias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias),"bias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias.plot),"bias.plot"] <- "NA"
+responsive.plot <- rbind(responsive.plot[responsive.plot$bias.plot%in%c("NA"),],
+                      responsive.plot[responsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+responsive.plot$bias.plot <- factor(responsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+```
+
+```{r, echo=F, out.width="linewidth",fig.align="center"}
+knitr::include_graphics("../results/AHBxEHB.png")
+```
+
+## Parent-of-origin allele-specific RNA m6A
+
+A Two-tailed, unpooled z-test of two proportions was conducted for each transcript for each SNP position to test for differences between maternal and paternal m6A probability among the samples. Z-test results were then FDR corrected and aggregated by transcript. For each transcript, all positions were required to exhibit the same direction of parent- or lineage-of-origin bias as described above.
+
+We identified 86 transcripts that showed consistent parent or lineage biases in RNA m6A in both crosses, including 71 from previously annotated genes, 14 novel transcripts, and 1 lincRNA. Some transcripts showed biased RNA m6A in both non-aggressive and aggressive workers ($n = 9$), whereas others were only biased in one group (non-aggressive only, $n = 32$; aggressive only, $n = 45$). In contrast to transcription, there was no relationship between parent-specific RNA m6A and offspring aggression. 
+
+```{r, echo=F}
+unresponsive.Z <- read.csv("../results/EHBxAHB_unresponsiveZ.csv")
+responsive.Z <- read.csv("../results/EHBxAHB_responsiveZ.csv")
+
+unresponsive.plot <- read.csv("../results/EHBxAHB_unresponsive_PSm6A.csv")
+unresponsive.plot[is.na(unresponsive.plot$xbias),"xbias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias),"bias"] <- "NA"
+unresponsive.plot[is.na(unresponsive.plot$bias.plot),"bias.plot"] <- "NA"
+unresponsive.plot <- rbind(unresponsive.plot[unresponsive.plot$bias.plot%in%c("NA"),],
+                      unresponsive.plot[unresponsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+unresponsive.plot$bias.plot <- factor(unresponsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+responsive.plot <- read.csv("../results/EHBxAHB_responsive_PSm6A.csv")
+responsive.plot[is.na(responsive.plot$xbias),"xbias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias),"bias"] <- "NA"
+responsive.plot[is.na(responsive.plot$bias.plot),"bias.plot"] <- "NA"
+responsive.plot <- rbind(responsive.plot[responsive.plot$bias.plot%in%c("NA"),],
+                      responsive.plot[responsive.plot$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+responsive.plot$bias.plot <- factor(responsive.plot$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+```
+
+```{r, echo=F, out.width="linewidth",fig.align="center"}
+knitr::include_graphics("../results/AHBxEHB_m6A.png")
+```
+
+## Compare PSGE to PSm6A, and DElincRNAs & isoform switching
+
+We find few genes that show both parent-of-origin allele-specific transcription and m6A, and few that show either that were differentially expressed and none that exhibited isoform switching.
+
+* In non-aggressive bees, two transcripts showed both allele-specific expression and allele-specific m6A
+* In aggressive bees, one transcripts showed both allele-specific expression and allele-specific m6A
+* No DElincRNAs also showed allele-specific expression or allele-specific RNA m6A
+* No genes showing significant isoform switching also showed allele-specific expression or allele-specific RNA m6A
+
+```{r, echo=F}
+un.PSGE <- read.csv("../results/EHBxAHB_unresponsive_PSGE.csv")
+un.PSGE[is.na(un.PSGE$xbias),"xbias"] <- "NA"
+un.PSGE[is.na(un.PSGE$bias),"bias"] <- "NA"
+un.PSGE[is.na(un.PSGE$bias.plot),"bias.plot"] <- "NA"
+un.PSGE <- rbind(un.PSGE[un.PSGE$bias.plot%in%c("NA"),],
+                      un.PSGE[un.PSGE$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+un.PSGE$bias.plot <- factor(un.PSGE$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+res.PSGE <- read.csv("../results/EHBxAHB_responsive_PSGE.csv")
+res.PSGE[is.na(res.PSGE$xbias),"xbias"] <- "NA"
+res.PSGE[is.na(res.PSGE$bias),"bias"] <- "NA"
+res.PSGE[is.na(res.PSGE$bias.plot),"bias.plot"] <- "NA"
+res.PSGE <- rbind(res.PSGE[res.PSGE$bias.plot%in%c("NA"),],
+                      res.PSGE[res.PSGE$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+res.PSGE$bias.plot <- factor(res.PSGE$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+un.m6A <- read.csv("../results/EHBxAHB_unresponsive_PSm6A.csv")
+un.m6A[is.na(un.m6A$xbias),"xbias"] <- "NA"
+un.m6A[is.na(un.m6A$bias),"bias"] <- "NA"
+un.m6A[is.na(un.m6A$bias.plot),"bias.plot"] <- "NA"
+un.m6A <- rbind(un.m6A[un.m6A$bias.plot%in%c("NA"),],
+                      un.m6A[un.m6A$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+un.m6A$bias.plot <- factor(un.m6A$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+res.m6A <- read.csv("../results/EHBxAHB_responsive_PSm6A.csv")
+res.m6A[is.na(res.m6A$xbias),"xbias"] <- "NA"
+res.m6A[is.na(res.m6A$bias),"bias"] <- "NA"
+res.m6A[is.na(res.m6A$bias.plot),"bias.plot"] <- "NA"
+res.m6A <- rbind(res.m6A[res.m6A$bias.plot%in%c("NA"),],
+                      res.m6A[res.m6A$bias.plot%in%c("mat", "AHB", "EHB", "pat"),])
+res.m6A$bias.plot <- factor(res.m6A$bias.plot,
+                                 levels = c("NA","mat", "AHB", "EHB", "pat"))
+
+un.matBias <- unique(un.PSGE[un.PSGE$bias.plot=="mat","gene"])
+res.matBias <- unique(res.PSGE[res.PSGE$bias.plot=="mat","gene"])
+un.patBias <- unique(un.PSGE[un.PSGE$bias.plot=="pat","gene"])
+res.patBias <- unique(res.PSGE[res.PSGE$bias.plot=="pat","gene"])
+
+un.m6A.matBias <- unique(un.m6A[un.m6A$bias.plot=="mat","gene"])
+res.m6A.matBias <- unique(res.m6A[res.m6A$bias.plot=="mat","gene"])
+un.m6A.patBias <- unique(un.m6A[un.m6A$bias.plot=="pat","gene"])
+res.m6A.patBias <- unique(res.m6A[res.m6A$bias.plot=="pat","gene"])
+
+un.PSGE.list <- c(un.matBias,un.patBias)
+un.m6A.list <- c(un.m6A.matBias,un.m6A.patBias)
+un.overlap.list <- intersect(un.PSGE.list,un.m6A.list)
+
+res.PSGE.list <- c(res.matBias,res.patBias)
+res.m6A.list <- c(res.m6A.matBias,res.m6A.patBias)
+res.overlap.list <- intersect(res.PSGE.list,res.m6A.list)
+
+
+SNP_pos <- read.csv("../results/SNP_gene_tx_IDs.csv",row.names=1)
+DElincRNAs <- read.csv("../results/DElincRNAs.csv",header=F)[,1]
+CK <- unique(SNP_pos[SNP_pos$Transcript%in%DElincRNAs,"Gene"])
+
+sigSwitches <- read.table("../results/sig_switches_by_phenotype.txt",header=1)
+sigSwitches$geneID <- as.character(sigSwitches$geneID)
+
+un.overlap.list <- intersect(unique(as.character(map(strsplit(un.PSGE.list, split = "[.]"), 1))), sigSwitches)
+un.overlap.list <- intersect(unique(as.character(map(strsplit(un.m6A.list, split = "[.]"), 1))), sigSwitches)
+
+res.overlap.list <- intersect(unique(as.character(map(strsplit(res.PSGE.list, split = "[.]"), 1))), sigSwitches)
+res.overlap.list <- intersect(unique(as.character(map(strsplit(res.m6A.list, split = "[.]"), 1))), sigSwitches)
+```
+
+## Session info
+
+```{r}
+sessionInfo()
+```
+
+# References
+
+[^kocher_2015]: Sarah D Kocher, Jennifer M Tsuruda, Joshua D Gibson, Christine M Emore, Miguel E Arechavaleta-Velasco, David C Queller, Joan E Strassmann, Christina M Grozinger, Michael R Gribskov, Phillip San Miguel, Rick Westerman, Greg J Hunt, A Search for Parent-of-Origin Effects on Honey Bee Gene Expression, G3 Genes|Genomes|Genetics, Volume 5, Issue 8, 1 August 2015, Pages 1657–1662, https://doi.org/10.1534/g3.115.017814
+
+[^galbraith_2016]: Galbraith, D. A., Kocher, S. D., Glenn, T., Albert, I., Hunt, G. J., Strassmann, J. E., ... & Grozinger, C. M. (2016). Testing the kinship theory of intragenomic conflict in honey bees (Apis mellifera). Proceedings of the National Academy of Sciences, 113(4), 1020-1025. https://doi.org/10.1073/pnas.1516636113
+
+[^galbraith_2020]: Galbraith, D. A., Ma, R., & Grozinger, C. M. (2021). Tissue‐specific transcription patterns support the kinship theory of intragenomic conflict in honey bees (Apis mellifera). Molecular ecology, 30(4), 1029-1041.  https://doi.org/10.1111/mec.15778
+
+[^minimap2]: Li, H. (2018). Minimap2: pairwise alignment for nucleotide sequences. Bioinformatics, 34:3094-3100. doi:10.1093/bioinformatics/bty191
+
+[^samtools]: Petr Danecek, James K Bonfield, Jennifer Liddle, John Marshall, Valeriu Ohan, Martin O Pollard, Andrew Whitwham, Thomas Keane, Shane A McCarthy, Robert M Davies, Heng Li (2021). Twelve years of SAMtools and BCFtools. GigaScience, Volume 10, Issue 2, giab008, https://doi.org/10.1093/gigascience/giab008
+
+[^flair]: Tang, A.D., Soulette, C.M., van Baren, M.J. et al. Full-length transcript characterization of SF3B1 mutation in chronic lymphocytic leukemia reveals downregulation of retained introns. Nat Commun 11, 1438 (2020). https://doi.org/10.1038/s41467-020-15171-6
+
+[^epinano]: Liu, H., Begik, O., Lucas, M.C. et al. Accurate detection of m6A RNA modifications in native RNA sequences. Nat Commun 10, 4079 (2019). https://doi.org/10.1038/s41467-019-11713-9

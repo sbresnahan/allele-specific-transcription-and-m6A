@@ -1,0 +1,12 @@
+T3Ag1A2C	20211215_1814_MN31747_FAR69866_d6eaa363	2021-12-19	2021-12-20	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/Dec2021_new_samples/
+T3Ag1A7Ct	20211213_2158_MN31747_FAR69833_64240cb3	2021-12-19	2021-12-20	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/Dec2021_new_samples/
+T3Ag1A9Ct	20211208_1930_MN31747_FAR67234_b514ec92	2021-12-19	2021-12-20	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/Dec2021_new_samples/
+T3Ag2A1Tx	20211206_2237_MN31747_FAR71240_f4ebade1	2021-12-19	2021-12-20	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/Dec2021_new_samples/
+6C	20201202_1610_MN31747_FAM94162_edc4338f	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/
+3T	20201207_2120_MN31747_FAM96346_76c2f419	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/
+2T	20210423_1758_MN31747_FAQ05341_a20df025	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/
+2C	20210426_2055_MN31747_FAQ05340_321eb355	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/2C/
+5C	20210428_1401_MN31747_FAQ06152_efdfee7b	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/
+3Tb	20210504_1600_MN31747_FAQ03537_101cecae	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/
+1Tb	20210514_1637_MN31747_FAP84430_13fd3d67	2021-10-20	2021-10-25	/home/groups/hpcbio/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/data/raw_seq/Central_State2020/
+T2Ag1B8T	20210915_1759_MN31747_FAR09630_0200d406	2021-10-20	2021-10-25	/home/groups/hpcbio/temp_fastqs/projects/libyarlay/libyarlay-oxfordRNA-2021Jun/raw-seq/data_transfer_2021-10-15/
