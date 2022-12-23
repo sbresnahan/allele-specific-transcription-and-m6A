@@ -33,7 +33,7 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 #### Prepare cross transcriptomes
 ##### > [txptome_prep_2022-07-06.sh](src/txptome_prep_2022-07-06.sh)
 #### Align and predict m6A with EpiNano
-#### > [epinano_array_script_2022-07-15.sh](src/epinano_array_script_2022-07-15.sh)
+##### > [epinano_array_script_2022-07-15.sh](src/epinano_array_script_2022-07-15.sh)
 #### Combine EpiNano results into a single table of coverage and methylation probabilities
 ##### > [combine_results_2022-08-03.R](src/combine_results_2022-08-03.R)
 
@@ -47,7 +47,7 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 ##### > [libyarlay_analysis_2022June_parenttxpt.R](src/libyarlay_analysis_2022June_parenttxpt.R)
 
 ### 7. Analysis of parent-of-origin allele-specific transcription and m6A, and their relationship to gene expression and isoform switching
-##### > Annotated markdown - [PSm6A.R](src/PSm6A.R)
+##### > Annotated markdown - [PSm6A.Rmd](reports/PSm6A.Rmd)
 
 ## Results
 
