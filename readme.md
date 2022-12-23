@@ -47,7 +47,7 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 ##### > [libyarlay_analysis_2022June_parenttxpt.R](src/libyarlay_analysis_2022June_parenttxpt.R)
 
 ### 7. Analysis of parent-of-origin allele-specific transcription and m6A, and their relationship to gene expression and isoform switching
-##### > Annotated markdown - [PSm6A.Rmd](reports/PSm6A.Rmd)
+##### > Annotated markdown - [PSm6A.Rmd](reports/PSm6A.Rmd) [PSm6A.html](https://sbresnahan.github.io/allele-specific-transcription-and-m6A/reports/PSm6A.html)
 
 ## Results
 
