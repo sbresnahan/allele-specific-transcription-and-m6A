@@ -33,7 +33,7 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 #### Prepare cross transcriptomes
 ##### > [txptome_prep_2022-07-06.sh](src/txptome_prep_2022-07-06.sh)
 #### Align and predict m6A with EpiNano
-#### > [epinano_array_script_2022-07-15.sh](src/epinano_array_script_2022-07-15.sh)
+##### > [epinano_array_script_2022-07-15.sh](src/epinano_array_script_2022-07-15.sh)
 #### Combine EpiNano results into a single table of coverage and methylation probabilities
 ##### > [combine_results_2022-08-03.R](src/combine_results_2022-08-03.R)
 
