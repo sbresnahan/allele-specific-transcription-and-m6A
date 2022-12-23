@@ -422,9 +422,9 @@ genome mapped to annotated transcripts (Fig. 2).  Number of genes detected was
 linearly correlated with library size, indicating that saturation of gene
 detection was not reached (Fig. 3).  The A-C group, which consisted entirely
 of new samples from December 2021, had the smallest library size and lowest
-number of genes detected (Figs. 1 and 3).  As compared to the analysis from
-February, about 500 more genes were detected per sample (Fig. 3 in this report
-vs. previous).
+number of genes detected (Figs. 1 and 3).
+
+Samples from cross A had far fewer reads mapping to the mitochondrial genome than samples from cross B did (Figs. 1 and 2). I determined that one of the novel nuclear genes called by Flair, NC_037641.1:1186000, was was highly similar in sequence to a region of the mitochondrial genome spanning the l-rRNA and ND1 genes. For the EHB parents, the sequence of this nuclear region was distinct from the mitochondrial region, and mitochondrial reads mapped correctly. However, for AHB parents, SNP calls in the VCF were applied very similarly to both the nuclear and mitochondrial regions, causing mitochondrial reads to be mapped incorrectly to the nuclear region. I do not anticipate that this mismapping will cause issues downstream, particularly after filtering mitochondrial reads (see below).
 
 ```{r fig01, fig.cap = "Fig. 1.  Library sizes expressed as number of aligned reads.", fig.width = 9, fig.height = 6}
 ggplot(targ_long, aes(x = Label, y = Reads, fill = Fate)) +
@@ -580,11 +580,6 @@ The following contrasts were then assessed:
 * **(BT - BC) - (AT - AC)**: Interaction effect; differential effect of cross on differences between T and C bees
 
 Numbers of significantly up- and down-regulated genes are shown in Table 1.
-Fewer genes were significant after fixing the Flair bug as compared to before
-fixing the bug.  However, nearly all significant genes were for differences
-between crosses, which could have been artificially inflated by the Flair bug,
-because alignment quality would have been better for some parents than for others
-depending on how many variants had been used to edit the transcript sequence.
 
 ```{r table01}
 temp <- summary(decideTests(fit2))
