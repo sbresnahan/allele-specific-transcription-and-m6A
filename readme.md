@@ -34,7 +34,13 @@ Additionally, we assess whether either allele-biased transcription or allele-bia
 ##### > [txptome_prep_2022-07-06.sh](src/txptome_prep_2022-07-06.sh)
 #### Align and predict m6A with EpiNano
 ##### > [epinano_array_script_2022-07-15.sh](src/epinano_array_script_2022-07-15.sh)
-#### Combine EpiNano results into a single table of coverage and methylation probabilities
+#### Mine transcriptome for RRACH motifs
+##### > [mine_txptome_m6a_2022-07-06.R](src/mine_txptome_m6a_2022-07-06.R)
+#### Subset EpiNano output to just RRACH motifs
+##### > [subset_epinano_variants_batch.R](src/subset_epinano_variants_batch.R)
+#### Convert transcriptome coordinates to genomic coordinates
+##### > [update_coordinates_batch.R](src/update_coordinates_batch.R)
+#### Combine EpiNano results into a single table of coverage and methylation probabilities at parent SNPs within transcripts
 ##### > [combine_results_2022-08-03.R](src/combine_results_2022-08-03.R)
 
 ### 4. Detection of lincRNAs
