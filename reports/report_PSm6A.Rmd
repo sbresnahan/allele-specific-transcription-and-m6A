@@ -141,6 +141,10 @@ responsive.plot$bias.plot <- factor(responsive.plot$bias.plot,
 knitr::include_graphics("../results/AHBxEHB.png")
 ```
 
+```{r, echo=F, out.width="linewidth",fig.align="center"}
+knitr::include_graphics("../results/EHBxAHB_hourglass.png")
+```
+
 ## Parent-of-origin allele-specific RNA m6A
 
 A Two-tailed, unpooled z-test of two proportions was conducted for each transcript for each SNP position to test for differences between maternal and paternal m6A probability among the samples. Z-test results were then FDR corrected and aggregated by transcript. For each transcript, all positions were required to exhibit the same direction of parent- or lineage-of-origin bias as described above.
@@ -172,6 +176,10 @@ responsive.plot$bias.plot <- factor(responsive.plot$bias.plot,
 
 ```{r, echo=F, out.width="linewidth",fig.align="center"}
 knitr::include_graphics("../results/AHBxEHB_m6A.png")
+```
+
+```{r, echo=F, out.width="linewidth",fig.align="center"}
+knitr::include_graphics("../results/EHBxAHB_m6A_hourglass.png")
 ```
 
 ## Compare PSGE to PSm6A, and DElincRNAs & isoform switching
