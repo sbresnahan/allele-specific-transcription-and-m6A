@@ -1,5 +1,7 @@
 # Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees
 
+[![DOI](https://zenodo.org/badge/581315672.svg)](https://zenodo.org/badge/latestdoi/581315672)
+
 ## Study design
 
 This study uses whole genome resequencing data produced by Illumina DNA sequencing and transcriptome data produced by Oxford Nanopore direct RNA sequencing to understand behavioral differences between non-aggressive and aggressive honey bees. Two crosses in a reciprocal cross design between Africanized honey bees (AHB) and European honey bees (EHB) were made. Three or more aggressive bees and three or more non-aggressive bees (labeled T and C, respectively) were collected from each cross. Twelve head and abdomen samples, spanning multiple batches over the course of a year, were ultimately analyzed, with three samples per experimental group. RNA samples were sequenced with Oxford Nanopore Technology direct RNA sequencing on a FLO-MIN106 flowcell.
