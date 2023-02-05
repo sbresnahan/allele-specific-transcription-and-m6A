@@ -1,4 +1,4 @@
-# Examining the role of transcription and post-transcriptional modifications on mediating intragenomic conflict in honey bees
+# Examining parent-of-origin effects on transcription and RNA methylation in mediating aggressive behavior in honey bees
 
 [![DOI](https://zenodo.org/badge/581315672.svg)](https://zenodo.org/badge/latestdoi/581315672)
 
